@@ -1,94 +1,271 @@
-Sim-Robot-Trainer
-A project focused on training a simulated robot to walk and perform tasks using reinforcement learning with Python, PyBullet, and Stable Baselines3.
+# Sim-Robot-Trainer
 
-🤖 Demo
-[A GIF of the trained robot walking will be placed here once a stable version is achieved.]
+A reinforcement learning project focused on training a simulated bipedal robot to walk using PyBullet physics simulation and Stable Baselines3 PPO algorithm.
 
-📖 Table of Contents
-Project Goal
+![Python](https://img.shields.io/badge/python-v3.8+-blue.svg)
+![PyBullet](https://img.shields.io/badge/PyBullet-3.2.5+-green.svg)
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
-Tech Stack
+## 🤖 Demo
 
-Installation
+*[A GIF or video of the trained robot walking will be added here once training is complete.]*
 
-Usage
+## 📖 Table of Contents
 
-Project Structure
+- [Project Goal](#-project-goal)
+- [Features](#-features)
+- [Tech Stack](#️-tech-stack)
+- [Installation](#️-installation)
+- [Usage](#️-usage)
+  - [Training a New Agent](#training-a-new-agent)
+  - [Running a Pre-trained Agent](#running-a-pre-trained-agent)
+  - [Available Commands](#available-commands)
+- [Project Structure](#-project-structure)
+- [Configuration](#-configuration)
+- [Robot Design](#-robot-design)
+- [Reward System](#-reward-system)
+- [Monitoring Training](#-monitoring-training)
+- [Troubleshooting](#-troubleshooting)
+- [Contributing](#-contributing)
+- [Future Work](#-future-work)
+- [License](#-license)
 
-Future Work
+## 🎯 Project Goal
 
-License
+The primary objective of this project is to explore reinforcement learning fundamentals by training a bipedal robot to develop a stable walking gait in a physics-based simulation. Starting from random actions, the agent learns through trial and error using the Proximal Policy Optimization (PPO) algorithm.
 
-🎯 Project Goal
-The primary objective of this project is to explore the fundamentals of reinforcement learning (RL) by training a virtual agent in a physics-based simulation. The goal is to develop a stable walking gait for a custom-designed robot, starting from random actions and learning through trial and error. This serves as a practical application of RL concepts and a deep dive into agent-environment interaction.
+**Key Learning Objectives:**
+- Understanding agent-environment interaction in RL
+- Implementing reward shaping for locomotion tasks
+- Working with continuous action spaces
+- Physics simulation integration with ML frameworks
 
-🛠️ Tech Stack
-Language: Python
+## ✨ Features
 
-Physics Simulation: PyBullet
+- **Custom Bipedal Robot**: Programmatically created using PyBullet primitives
+- **PPO Algorithm**: State-of-the-art policy gradient method for continuous control
+- **Comprehensive CLI**: Interactive training and evaluation interface
+- **Real-time Monitoring**: TensorBoard integration for training visualization
+- **Modular Architecture**: Clean, maintainable code structure
+- **Robust Reward System**: Multi-component reward function for stable walking
+- **Checkpoint Management**: Automatic model saving and loading
 
-Reinforcement Learning Framework: Stable Baselines3
+## 🛠️ Tech Stack
 
-Neural Network Library: PyTorch
+| Component | Technology | Version |
+|-----------|------------|----------|
+| **Language** | Python | 3.8+ |
+| **Physics Simulation** | PyBullet | 3.2.5+ |
+| **RL Framework** | Stable Baselines3 | 2.0.0+ |
+| **Deep Learning** | PyTorch | 1.13.0+ |
+| **Environment Interface** | Gymnasium | 0.28.0+ |
+| **Monitoring** | TensorBoard | 2.10.0+ |
+| **Numerical Computing** | NumPy | 1.21.0+ |
+| **Visualization** | Matplotlib | 3.5.0+ |
 
-Numerical Computation: NumPy
+## ⚙️ Installation
 
-⚙️ Installation
-To set up the project on your local machine, follow these steps:
+### Prerequisites
+- Python 3.8 or higher
+- Git
 
-Clone the repository:
+### Setup Steps
 
-git clone [https://github.com/YourGitHubUsername/sim-robot-trainer.git](https://github.com/Usman-Siddiqi/sim-robot-trainer.git)
-cd sim-robot-trainer
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/Usman-Siddiqi/sim-robot-trainer.git
+   cd sim-robot-trainer
+   ```
 
-Create a virtual environment (recommended):
+2. **Create a virtual environment (recommended):**
+   ```bash
+   python -m venv venv
+   
+   # On Windows:
+   venv\Scripts\activate
+   
+   # On macOS/Linux:
+   source venv/bin/activate
+   ```
 
-python -m venv venv
-source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
+3. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-Install the required dependencies:
+4. **Verify installation:**
+   ```bash
+   python main.py --help
+   ```
 
-pip install -r requirements.txt
+## ▶️ Usage
 
-▶️ Usage
-Once the installation is complete, you can train a new agent or run a pre-trained one.
+### Training a New Agent
 
-Training a New Agent
-To start the training process from scratch, run the training script:
+Start training with default parameters:
+```bash
+python main.py --train
+```
 
-python train.py
+Customize training parameters:
+```bash
+python main.py --train --timesteps 2000000 --render_training
+```
 
-Models will be saved periodically to the models/ directory.
+Quick test training (shorter session):
+```bash
+python main.py --quick_test
+```
 
-Running a Pre-trained Agent
-To visualize the behavior of a saved model, run the main script with the --run flag and specify the model path:
+### Running a Pre-trained Agent
 
-python main.py --run --model_path models/your_best_model.zip
+Run a specific model:
+```bash
+python main.py --run --model_path models/robot_walker_final_20231012_143000.zip --episodes 10
+```
 
-(Note: This functionality is planned for a future update.)
+Interactive model selection:
+```bash
+python main.py --interactive
+```
 
-📂 Project Structure
-The project is organized into several modules to keep the code clean and maintainable:
+### Available Commands
 
+| Command | Description |
+|---------|-------------|
+| `--train` | Start training a new model |
+| `--run` | Run a pre-trained model |
+| `--list` | List all available trained models |
+| `--interactive` | Interactive model selection and running |
+| `--quick_test` | Run a short training session for testing |
+
+**Training Options:**
+- `--timesteps INT`: Number of training timesteps (default: 1,000,000)
+- `--render_training`: Enable visual rendering during training
+
+**Running Options:**
+- `--model_path PATH`: Path to the trained model file
+- `--episodes INT`: Number of episodes to run (default: 5)
+- `--no_render`: Disable visual rendering
+
+## 📂 Project Structure
+
+```
 sim-robot-trainer/
-├── models/             # Directory for saved model files
-├── main.py             # Main entry point for running/training
-├── environment.py      # Defines the PyBullet simulation environment
-├── agent.py            # Defines the RL agent and its architecture
-├── train.py            # Contains the main training loop
-├── config.py           # Stores all hyperparameters and settings
-└── requirements.txt    # Lists all project dependencies
+├── 📁 models/              # Saved model files and checkpoints
+├── 📁 logs/                # Training logs and TensorBoard data
+├── 📄 main.py              # CLI entry point and model execution
+├── 📄 train.py             # Training loop and callbacks
+├── 📄 agent.py             # PPO agent configuration and utilities
+├── 📄 environment.py       # Robot environment and physics setup
+├── 📄 config.py            # Hyperparameters and configuration
+├── 📄 requirements.txt     # Project dependencies
+├── 📄 .gitignore          # Git ignore rules
+└── 📄 README.md           # This file
+```
 
-🚀 Future Work
-This project is actively under development. Future plans include:
+## ⚙️ Configuration
 
-[ ] Implementing a more complex robot model with additional joints.
+Key hyperparameters can be modified in `config.py`:
 
-[ ] Training the robot to navigate environments with obstacles.
+```python
+# Training Parameters
+LEARNING_RATE = 3e-4
+GAMMA = 0.99
+MAX_EPISODE_STEPS = 2000
 
-[ ] Adding command-line arguments for easier hyperparameter tuning.
+# Environment Parameters
+SIMULATION_TIMESTEP = 1/240
+ROBOT_START_HEIGHT = 1.0
+FALL_THRESHOLD = 0.3
 
-[ ] Creating a detailed results analysis with performance graphs.
+# Reward Parameters
+FORWARD_REWARD_SCALE = 100.0
+FALL_PENALTY = -100.0
+```
 
-📄 License
-This project is licensed under the MIT License. See the LICENSE file for more details.
+## 🤖 Robot Design
+
+The bipedal robot is programmatically created with:
+- **Torso**: Main body (box shape)
+- **4 Controllable Joints**: 2 hips + 2 knees
+- **6 Links Total**: Upper legs, lower legs, and feet
+- **Physics Properties**: Realistic mass distribution and damping
+
+**Action Space**: 4 continuous values (joint torques)  
+**Observation Space**: 17 values including joint states, torso orientation, and velocities
+
+## 🎯 Reward System
+
+The reward function encourages walking behavior through multiple components:
+
+- ✅ **Forward Progress**: Rewards movement in positive X direction
+- ⚖️ **Stability**: Penalizes excessive tilting (roll/pitch)
+- 🏃 **Upright Stance**: Bonus for maintaining minimum height
+- ❌ **Fall Penalty**: Large negative reward for falling
+
+## 📊 Monitoring Training
+
+Monitor training progress with TensorBoard:
+```bash
+tensorboard --logdir logs/tensorboard/
+```
+
+Training metrics include:
+- Episode rewards
+- Policy loss
+- Value function loss
+- Entropy (exploration measure)
+
+## 🔧 Troubleshooting
+
+### Common Issues
+
+**"No module named 'pybullet'"**
+- Ensure virtual environment is activated
+- Run: `pip install -r requirements.txt`
+
+**Training is too slow**
+- Disable rendering: Remove `--render_training` flag
+- Reduce timesteps for testing: Use `--quick_test`
+
+**Model files not found**
+- Check if `models/` directory exists
+- Use `--list` to see available models
+
+**GPU not detected**
+- The project uses CPU by default for stability
+- GPU support can be enabled by modifying device settings in `agent.py`
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to:
+- Report bugs and issues
+- Suggest new features
+- Submit pull requests
+- Improve documentation
+
+## 🚀 Future Work
+
+Planned enhancements:
+
+- [ ] **Advanced Robot Models**: More complex bipedal designs with additional joints
+- [ ] **Terrain Variety**: Training on slopes, stairs, and uneven surfaces
+- [ ] **Obstacle Navigation**: Dynamic obstacle avoidance during walking
+- [ ] **Gait Analysis**: Detailed biomechanical analysis tools
+- [ ] **Multi-Agent Training**: Training multiple robots simultaneously
+- [ ] **Real Robot Transfer**: Sim-to-real transfer learning capabilities
+- [ ] **Advanced Algorithms**: Implementation of SAC, TD3, and other RL algorithms
+- [ ] **Web Interface**: Browser-based training monitoring and control
+
+## 📄 License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+---
+
+**Author**: Usman Siddiqi  
+**Contact**: [GitHub Profile](https://github.com/Usman-Siddiqi)  
+**Project Link**: [sim-robot-trainer](https://github.com/Usman-Siddiqi/sim-robot-trainer)
+
+⭐ **Star this repository if you find it helpful!**
