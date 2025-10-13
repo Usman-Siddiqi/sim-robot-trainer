@@ -21,7 +21,8 @@ import time
 from config import (
     SIMULATION_TIMESTEP, MAX_EPISODE_STEPS, ROBOT_START_HEIGHT,
     FALL_THRESHOLD, FORWARD_REWARD_SCALE, FALL_PENALTY,
-    NUM_JOINTS, MAX_TORQUE, RENDER_MODE
+    NUM_JOINTS, MAX_TORQUE, RENDER_MODE, STABILITY_PENALTY_SCALE,
+    UPRIGHT_REWARD
 )
 
 
@@ -153,9 +154,9 @@ class RobotEnv(gym.Env):
         )
         
         # Mass properties
-        torso_mass = 5.0
-        leg_mass = 1.0
-        foot_mass = 0.5
+        torso_mass = 9.0
+        leg_mass = 4.0
+        foot_mass = 1.5
         
         # Link positions relative to parent
         hip_offset = 0.15  # Distance from torso center to hip
@@ -271,6 +272,10 @@ class RobotEnv(gym.Env):
         
         self.episode_steps = 0
         
+        # Reset action tracking for smoothness penalty
+        self.prev_action = None
+        self.current_action = None
+        
         # Reset robot position and orientation
         p.resetBasePositionAndOrientation(
             self.robot_id,
@@ -309,13 +314,24 @@ class RobotEnv(gym.Env):
         """
         self.episode_steps += 1
         
-        # Apply actions (torque control)
+        # Store previous action for smoothness penalty
+        self.prev_action = getattr(self, 'current_action', np.zeros_like(action))
+        self.current_action = np.array(action)
+        
+        # Apply actions (joint-specific torque limits)
+        from config import HIP_MAX_TORQUE, KNEE_MAX_TORQUE
+        
         for i, joint_index in enumerate(self.joint_indices):
+            if joint_index in [0, 3]:  # Hip joints
+                torque = np.clip(action[i], -HIP_MAX_TORQUE, HIP_MAX_TORQUE)
+            else:  # Knee joints
+                torque = np.clip(action[i], -KNEE_MAX_TORQUE, KNEE_MAX_TORQUE)
+            
             p.setJointMotorControl2(
                 self.robot_id,
                 joint_index,
                 p.TORQUE_CONTROL,
-                force=action[i]
+                force=torque
             )
         
         # Step the simulation
@@ -376,10 +392,11 @@ class RobotEnv(gym.Env):
         Returns:
             reward (float): Calculated reward value
         """
-        # Get current position
-        current_pos, _ = p.getBasePositionAndOrientation(self.robot_id)
+        # Get current state
+        current_pos, base_orn = p.getBasePositionAndOrientation(self.robot_id)
+        roll, pitch, yaw = p.getEulerFromQuaternion(base_orn)
         
-        # Reward for forward movement (positive x direction)
+        # Forward progress (balanced)
         if self.prev_position is not None:
             forward_progress = current_pos[0] - self.prev_position[0]
             forward_reward = forward_progress * FORWARD_REWARD_SCALE
@@ -389,24 +406,23 @@ class RobotEnv(gym.Env):
         # Update previous position
         self.prev_position = current_pos
         
-        # Penalty for falling (torso too low)
-        height_penalty = 0
-        if current_pos[2] < FALL_THRESHOLD:
-            height_penalty = FALL_PENALTY
+        # Height penalty (smooth)
+        height_penalty = -max(0, FALL_THRESHOLD - current_pos[2]) * 10.0
         
-        # Penalty for excessive tilting
-        _, base_orn = p.getBasePositionAndOrientation(self.robot_id)
-        roll, pitch, yaw = p.getEulerFromQuaternion(base_orn)
-        stability_penalty = -abs(roll) * 5 - abs(pitch) * 5
+        # Stability penalty (balanced)
+        stability_penalty = -(abs(roll) + abs(pitch)) * STABILITY_PENALTY_SCALE
         
-        # Small reward for staying upright
-        upright_reward = 1.0 if current_pos[2] > FALL_THRESHOLD else 0
+        # Upright bonus (small)
+        upright_reward = UPRIGHT_REWARD if current_pos[2] > FALL_THRESHOLD else 0
         
-        # Energy penalty (encourage efficient movement)
-        # This would require storing previous actions, simplified for now
-        energy_penalty = 0
+        # Action smoothness (prevents jittery movements)
+        if hasattr(self, 'prev_action') and hasattr(self, 'current_action'):
+            action_penalty = -0.01 * np.sum(np.square(self.current_action - self.prev_action))
+        else:
+            action_penalty = 0
         
-        total_reward = forward_reward + height_penalty + stability_penalty + upright_reward + energy_penalty
+        total_reward = (forward_reward + height_penalty + 
+                       stability_penalty + upright_reward + action_penalty)
         
         return total_reward
     

@@ -10,24 +10,28 @@ to tune the model and simulation without modifying the core logic.
 """
 
 # Reinforcement Learning Hyperparameters
-LEARNING_RATE = 3e-4  # Learning rate for the PPO algorithm
-GAMMA = 0.99          # Discount factor for future rewards
-TOTAL_TIMESTEPS = 10000000  # Total number of timesteps for training (10M for better walking)
+LEARNING_RATE = 3e-4
+GAMMA = 0.99
+TOTAL_TIMESTEPS = 5000000  # Reduced slightly, focus on quality
 
 # Model and File Paths
 MODEL_SAVE_PATH = "models/"  # Directory to save trained models
 
 # Simulation Parameters
 SIMULATION_TIMESTEP = 1/240  # PyBullet simulation timestep (240 Hz)
-MAX_EPISODE_STEPS = 2000     # Maximum steps per episode (increased for longer walking attempts)
-RENDER_MODE = False          # Set to False for faster training (no visualization)
+MAX_EPISODE_STEPS = 1500     # ~6 seconds at 240Hz
+RENDER_MODE = False
 
 # Robot Physical Parameters
-ROBOT_START_HEIGHT = 0.7     # Initial height of robot torso
-FALL_THRESHOLD = 0.3         # Height below which robot is considered fallen
-FORWARD_REWARD_SCALE = 100.0  # Scaling factor for forward movement reward (increased for better learning)
-FALL_PENALTY = -50.0        # Penalty for falling over (reduced to encourage exploration)
+ROBOT_START_HEIGHT = 0.83  # Realistic standing height
+FALL_THRESHOLD = 0.4       # 50% of standing height
+FORWARD_REWARD_SCALE = 10.0    # Reduced 10x for balance
+FALL_PENALTY = -10.0           # Reduced for exploration
+STABILITY_PENALTY_SCALE = 2.0  # New parameter
+UPRIGHT_REWARD = 0.5           # Reduced to balance
 
 # Action and Observation Space Parameters
-NUM_JOINTS = 4               # Number of controllable joints (2 hips, 2 knees)
-MAX_TORQUE = 50.0           # Maximum torque that can be applied to joints
+NUM_JOINTS = 4
+HIP_MAX_TORQUE = 120.0    # Hips need more torque
+KNEE_MAX_TORQUE = 60.0    # Knees need less
+MAX_TORQUE = 120.0        # Keep for backwards compatibility
