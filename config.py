@@ -23,7 +23,7 @@ MAX_EPISODE_STEPS = 2000     # Maximum steps per episode (increased for longer w
 RENDER_MODE = False          # Set to False for faster training (no visualization)
 
 # Robot Physical Parameters
-ROBOT_START_HEIGHT = 1.0     # Initial height of robot torso
+ROBOT_START_HEIGHT = 0.7     # Initial height of robot torso
 FALL_THRESHOLD = 0.3         # Height below which robot is considered fallen
 FORWARD_REWARD_SCALE = 100.0  # Scaling factor for forward movement reward (increased for better learning)
 FALL_PENALTY = -50.0        # Penalty for falling over (reduced to encourage exploration)

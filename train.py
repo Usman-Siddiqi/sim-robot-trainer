@@ -14,16 +14,43 @@ import os
 import time
 from datetime import datetime
 import argparse
+import glob
 
 from environment import RobotEnv
-from agent import create_agent, create_callbacks, save_agent, get_device_info
+from agent import create_agent, create_callbacks, save_agent, get_device_info, load_trained_agent
 from config import TOTAL_TIMESTEPS, MODEL_SAVE_PATH
+
+
+def find_latest_model(models_dir=MODEL_SAVE_PATH):
+    """
+    Find the most recent model file in the models directory.
+    
+    Args:
+        models_dir (str): Directory to search for model files
+        
+    Returns:
+        str or None: Path to the latest model file, or None if no models found
+    """
+    if not os.path.exists(models_dir):
+        return None
+    
+    # Look for .zip model files
+    model_pattern = os.path.join(models_dir, "*.zip")
+    model_files = glob.glob(model_pattern)
+    
+    if not model_files:
+        return None
+    
+    # Sort by modification time, newest first
+    latest_model = max(model_files, key=os.path.getmtime)
+    return latest_model
 
 
 def train(total_timesteps=TOTAL_TIMESTEPS, 
           save_path=MODEL_SAVE_PATH,
           render_training=True,
-          model_name=None):
+          model_name=None,
+          force_fresh_start=False):
     """
     Main training function for the robot walking agent.
     
@@ -32,6 +59,7 @@ def train(total_timesteps=TOTAL_TIMESTEPS,
         save_path (str): Directory to save the trained model
         render_training (bool): Whether to render during training
         model_name (str): Custom name for the saved model
+        force_fresh_start (bool): Force starting fresh even if models exist
     """
     
     print("=== Robot Walking Training ===")
@@ -42,15 +70,25 @@ def train(total_timesteps=TOTAL_TIMESTEPS,
     # Show device information
     get_device_info()
     
+    # Check for existing models to resume from
+    latest_model = find_latest_model(save_path) if not force_fresh_start else None
+    
     # Create the environment
     print("\nCreating environment...")
     env = RobotEnv(render_mode=render_training)
     print("Environment created successfully!")
     
-    # Create the agent
-    print("\nCreating PPO agent...")
-    agent = create_agent(env, verbose=1)
-    print("Agent created successfully!")
+    # Create or load the agent
+    if latest_model:
+        print(f"\nFound existing model: {latest_model}")
+        print("Resuming training from latest checkpoint...")
+        agent = load_trained_agent(latest_model, env)
+        print("Agent loaded successfully from checkpoint!")
+    else:
+        print("\nNo existing models found. Starting fresh training...")
+        print("Creating new PPO agent...")
+        agent = create_agent(env, verbose=1)
+        print("Agent created successfully!")
     
     # Create callbacks for monitoring and saving
     print("\nSetting up training callbacks...")
@@ -71,7 +109,7 @@ def train(total_timesteps=TOTAL_TIMESTEPS,
             total_timesteps=total_timesteps,
             callback=callbacks,
             log_interval=10,        # Log every 10 updates
-            reset_num_timesteps=True,
+            reset_num_timesteps=(latest_model is None),  # Only reset if starting fresh
             tb_log_name="robot_walker_training"
         )
         
@@ -235,6 +273,9 @@ def main():
     parser.add_argument("--render", action="store_true",
                        help="Render the environment during training (slower)")
     
+    parser.add_argument("--fresh", action="store_true",
+                       help="Force fresh training (ignore existing models)")
+    
     parser.add_argument("--model_name", type=str, default=None,
                        help="Custom name for the saved model")
     
@@ -261,7 +302,8 @@ def main():
             total_timesteps=args.timesteps,
             save_path=args.save_path,
             render_training=args.render,
-            model_name=args.model_name
+            model_name=args.model_name,
+            force_fresh_start=args.fresh
         )
 
 
