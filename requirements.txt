@@ -1,0 +1,24 @@
+# Physics simulation
+pybullet>=3.2.5
+
+# Reinforcement learning framework
+stable-baselines3[extra]>=2.0.0
+
+# Deep learning backend
+torch>=1.13.0
+torchvision>=0.14.0
+
+# OpenAI Gym compatibility
+gymnasium>=0.28.0
+
+# Numerical computation
+numpy>=1.21.0
+
+# Plotting and visualization
+matplotlib>=3.5.0
+
+# For better progress tracking during training
+tqdm>=4.64.0
+
+# Logging and monitoring
+tensorboard>=2.10.0
