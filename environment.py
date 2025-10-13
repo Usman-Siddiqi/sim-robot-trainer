@@ -416,7 +416,7 @@ class RobotEnv(gym.Env):
         upright_reward = UPRIGHT_REWARD if current_pos[2] > FALL_THRESHOLD else 0
         
         # Action smoothness (prevents jittery movements)
-        if hasattr(self, 'prev_action') and hasattr(self, 'current_action'):
+        if hasattr(self, 'prev_action') and hasattr(self, 'current_action') and self.prev_action is not None and self.current_action is not None:
             action_penalty = -0.01 * np.sum(np.square(self.current_action - self.prev_action))
         else:
             action_penalty = 0
