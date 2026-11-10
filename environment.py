@@ -2,482 +2,438 @@
 environment.py
 
 Author: Usman Siddiqi
-Date: 2025-10-12
 
-This script defines the simulation environment for the robot using PyBullet.
-It contains the RobotEnv class, which handles the physics simulation,
-robot state, actions, and reward calculation. This class is designed to be
-compatible with reinforcement learning libraries like Stable Baselines3.
+Batched MuJoCo environment for the biped: thousands of robots are simulated at
+once. Physics for all robots is stepped by `mujoco.rollout`, a C++ thread pool
+that uses every CPU core, while observations and rewards are computed for the
+whole batch with vectorised numpy. The API is the usual vectorised-RL one:
+
+    env = BipedEnv(num_envs=2048)
+    obs = env.reset()
+    obs, reward, done, info = env.step(actions)     # all arrays have a leading (num_envs,) axis
+
+Task: follow a commanded forward speed and heading over flat ground and
+staircases. Finished episodes are reset automatically inside step(), and a
+curriculum moves each robot to harder / easier stairs depending on how it did.
+
+Action  (12): joint position offsets from the default pose, tracked by PD servos.
+Observation : base velocity, angular velocity, gravity direction, command,
+              joint positions / velocities, previous action, gait clock and a
+              height scan of the terrain around the robot.
 """
 
-import pybullet as p
-import pybullet_data
+import os
+
+import mujoco
 import numpy as np
-import gymnasium as gym
-from gymnasium import spaces
-import math
-import time
+from mujoco import rollout
 
-from config import (
-    SIMULATION_TIMESTEP, MAX_EPISODE_STEPS, ROBOT_START_HEIGHT,
-    FALL_THRESHOLD, FORWARD_REWARD_SCALE, FALL_PENALTY,
-    NUM_JOINTS, MAX_TORQUE, RENDER_MODE, STABILITY_PENALTY_SCALE,
-    UPRIGHT_REWARD
-)
+from config import CommandCfg, DomainRandCfg, ObsCfg, RewardCfg, RobotCfg, SimCfg, TerrainCfg
+from terrain import FLAT, Terrain, build_model
+
+# sensordata layout (see <sensor> in robot/biped.xml)
+_TOUCH = slice(0, 2)
+_FOOT_POS = slice(2, 8)
+_FOOT_VEL = slice(8, 14)
+_FOOT_UP = slice(14, 20)
+_NUM_SENSOR = 20
 
 
-class RobotEnv(gym.Env):
-    """
-    Custom environment for training a bipedal robot to walk using PyBullet.
-    
-    This environment creates a simple bipedal robot programmatically and
-    provides the OpenAI Gym interface for reinforcement learning.
-    """
-    
-    metadata = {'render.modes': ['human']}
-    
-    def __init__(self, render_mode=RENDER_MODE):
+def quat_rotate_inverse(q, v):
+    """Rotate world-frame vectors v (N,3) into the body frame of quaternions q (N,4; w,x,y,z)."""
+    w = q[:, 0:1]
+    u = q[:, 1:4]
+    return v * (2.0 * w * w - 1.0) - 2.0 * w * np.cross(u, v) + 2.0 * u * np.sum(u * v, axis=1, keepdims=True)
+
+
+def wrap_to_pi(a):
+    return (a + np.pi) % (2.0 * np.pi) - np.pi
+
+
+class BipedEnv:
+    def __init__(self, num_envs, flat_only=False, num_threads=None, seed=0,
+                 curriculum=None, fixed_level=None, terrain_proportions=None,
+                 push_robots=None, fixed_speed=None, resample_commands=True):
         """
-        Initialize the robot environment.
-        
         Args:
-            render_mode (bool): Whether to render the simulation visually
+            num_envs: number of robots simulated in parallel
+            flat_only: train on flat ground only (no stairs)
+            num_threads: physics threads (default: all logical cores)
+            seed: random seed
+            curriculum: override TerrainCfg.curriculum (False keeps levels fixed)
+            fixed_level: start every stairs robot on this level instead of the easy ones
+            terrain_proportions: override TerrainCfg.proportions
+            push_robots: override DomainRandCfg.push_robots
+            fixed_speed: always command this forward speed [m/s] (evaluation / demos)
+            resample_commands: pick a new random speed / heading every few seconds
         """
-        super(RobotEnv, self).__init__()
-        
-        self.render_mode = render_mode
-        self.episode_steps = 0
-        self.max_episode_steps = MAX_EPISODE_STEPS
-        
-        # Connect to PyBullet
-        if self.render_mode:
-            self.physics_client = p.connect(p.GUI)
+        self.num_envs = int(num_envs)
+        self.rng = np.random.default_rng(seed)
+        self.dt = SimCfg.control_dt()
+        self.max_episode_length = int(round(SimCfg.episode_length_s / self.dt))
+        self.curriculum = TerrainCfg.curriculum if curriculum is None else curriculum
+        self.push_robots = DomainRandCfg.push_robots if push_robots is None else push_robots
+        self.fixed_speed = fixed_speed
+        self.resample_commands = resample_commands
+
+        # ------------------------------------------------------------- model
+        self.terrain = Terrain(TerrainCfg, flat_only=flat_only)
+        self.model = build_model(SimCfg, self.terrain)
+        m = self.model
+        self.num_actions = m.nu
+        if m.nq != 7 + m.nu or m.nv != 6 + m.nu or m.na != 0 or m.nsensordata != _NUM_SENSOR:
+            raise RuntimeError("robot/biped.xml does not match what environment.py expects")
+        for i, name in enumerate(RobotCfg.joint_names):
+            if mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_ACTUATOR, i) != name:
+                raise RuntimeError(f"actuator {i} should be '{name}'")
+
+        self.num_threads = int(num_threads or os.cpu_count() or 1)
+        self._rollout = rollout.Rollout(nthread=self.num_threads)
+        self._datas = [mujoco.MjData(m) for _ in range(self.num_threads)]
+        self._state_spec = mujoco.mjtState.mjSTATE_FULLPHYSICS
+        nstate = mujoco.mj_stateSize(m, self._state_spec)
+        assert nstate == 1 + m.nq + m.nv
+        self._qpos = slice(1, 1 + m.nq)
+        self._qvel = slice(1 + m.nq, 1 + m.nq + m.nv)
+
+        n, nu = self.num_envs, self.num_actions
+        self.state = np.zeros((n, nstate))
+        self._state_traj = np.zeros((n, SimCfg.decimation, nstate))
+        self._sensor_traj = np.zeros((n, SimCfg.decimation, _NUM_SENSOR))
+        self._ctrl = np.zeros((n, 1, nu))
+
+        # ------------------------------------------------------ robot constants
+        self.default_joint_pos = np.array(RobotCfg.default_joint_pos, dtype=np.float64)
+        jnt_range = m.jnt_range[1:1 + nu].copy()            # joint 0 is the free joint
+        self.joint_lower, self.joint_upper = jnt_range[:, 0], jnt_range[:, 1]
+        mid = 0.5 * (self.joint_lower + self.joint_upper)
+        half = 0.5 * (self.joint_upper - self.joint_lower) * RewardCfg.soft_joint_limit
+        self.soft_lower, self.soft_upper = mid - half, mid + half
+        self.kp = m.actuator_gainprm[:, 0].copy()
+        self.kd = -m.actuator_biasprm[:, 2].copy()
+        self.torque_limit = m.actuator_forcerange[:, 1].copy()
+        self._hip_idx = np.array([0, 1, 6, 7])              # hip yaw / roll joints
+
+        # ---------------------------------------------------------- observation
+        sx, sy = np.meshgrid(np.array(ObsCfg.scan_x), np.array(ObsCfg.scan_y), indexing="ij")
+        self._scan_x, self._scan_y = sx.ravel(), sy.ravel()
+        self.num_scan = self._scan_x.size
+        self.num_obs = 3 + 3 + 3 + 3 + nu + nu + nu + 2 + self.num_scan
+        # terrain is sampled under each foot at these offsets along the heading (heel .. ahead of toe)
+        self._foot_probe = np.array([-0.10, 0.0, 0.10, 0.20])
+
+        # ------------------------------------------------------------- buffers
+        self.episode_length = np.zeros(n, dtype=np.int64)
+        self.actions = np.zeros((n, nu))
+        self.last_actions = np.zeros((n, nu))
+        self.last_joint_vel = np.zeros((n, nu))
+        self.commands = np.zeros((n, 3))                    # vx, vy, yaw rate
+        self.heading_target = np.zeros(n)
+        self.contact = np.zeros((n, 2), dtype=bool)
+        self.foot_pos = np.zeros((n, 2, 3))
+        self.foot_vel = np.zeros((n, 2, 3))
+        self.foot_up = np.zeros((n, 2, 3))
+        self.foot_up[:, :, 2] = 1.0
+        self.common_step = 0
+
+        # terrain assignment: each robot has a fixed terrain type (row) and a level that changes
+        props = np.array([1.0] if flat_only else (terrain_proportions or TerrainCfg.proportions), dtype=np.float64)
+        props = props / props.sum()
+        bounds = np.round(np.cumsum(props) * n).astype(np.int64)
+        self.env_row = np.searchsorted(bounds, np.arange(n), side="right").clip(0, self.terrain.num_rows - 1)
+        self.is_flat = self.terrain.kinds[self.env_row] == FLAT
+        max_level = self.terrain.num_levels - 1
+        if fixed_level is not None:
+            self.env_level = np.full(n, int(np.clip(fixed_level, 0, max_level)), dtype=np.int64)
         else:
-            self.physics_client = p.connect(p.DIRECT)
-        
-        # Set up PyBullet environment
-        p.setAdditionalSearchPath(pybullet_data.getDataPath())
-        p.setGravity(0, 0, -9.81)
-        p.setTimeStep(SIMULATION_TIMESTEP)
-        p.setRealTimeSimulation(0)
-        
-        # Load ground plane
-        self.plane_id = p.loadURDF("plane.urdf")
-        
-        # Robot body parts and joints
-        self.robot_id = None
-        self.joint_indices = []
-        self.initial_position = [0, 0, ROBOT_START_HEIGHT]
-        
-        # Define action space: torques for 4 joints (2 hips, 2 knees)
-        self.action_space = spaces.Box(
-            low=-MAX_TORQUE,
-            high=MAX_TORQUE,
-            shape=(NUM_JOINTS,),
-            dtype=np.float32
-        )
-        
-        # Define observation space: joint angles, velocities, torso orientation, and position
-        # 4 joint angles + 4 joint velocities + 3 torso orientation + 3 torso position + 3 torso linear velocity
-        self.observation_space = spaces.Box(
-            low=-np.inf,
-            high=np.inf,
-            shape=(17,),
-            dtype=np.float32
-        )
-        
-        # Create the robot
-        self._create_robot()
-        
-        # Previous position for calculating forward movement
-        self.prev_position = None
-        
-    def _create_robot(self):
+            self.env_level = self.rng.integers(0, min(TerrainCfg.max_init_level, max_level) + 1, size=n)
+
+        self.reward_weights = {k: v for k, v in RewardCfg.weights.items() if v != 0.0}
+        self.episode_sums = {k: np.zeros(n) for k in self.reward_weights}
+        self._gravity = np.tile(np.array([0.0, 0.0, -1.0]), (n, 1))
+
+    # ================================================================== API
+    def reset(self):
+        """Reset every robot and return the first observation."""
+        self._reset_envs(np.arange(self.num_envs))
+        self._update_kinematics()
+        self._update_commands()
+        return self._compute_obs()
+
+    def step(self, actions):
         """
-        Programmatically create a simple bipedal robot using basic PyBullet shapes.
-        """
-        # Robot dimensions
-        torso_height = 0.6
-        torso_width = 0.3
-        torso_depth = 0.2
-        
-        upper_leg_length = 0.4
-        lower_leg_length = 0.4
-        leg_radius = 0.05
-        
-        # Create torso (main body)
-        torso_collision = p.createCollisionShape(
-            p.GEOM_BOX,
-            halfExtents=[torso_width/2, torso_depth/2, torso_height/2]
-        )
-        torso_visual = p.createVisualShape(
-            p.GEOM_BOX,
-            halfExtents=[torso_width/2, torso_depth/2, torso_height/2],
-            rgbaColor=[0.7, 0.7, 0.7, 1]
-        )
-        
-        # Create upper legs
-        upper_leg_collision = p.createCollisionShape(
-            p.GEOM_CYLINDER,
-            radius=leg_radius,
-            height=upper_leg_length
-        )
-        upper_leg_visual = p.createVisualShape(
-            p.GEOM_CYLINDER,
-            radius=leg_radius,
-            length=upper_leg_length,
-            rgbaColor=[0.5, 0.5, 0.8, 1]
-        )
-        
-        # Create lower legs
-        lower_leg_collision = p.createCollisionShape(
-            p.GEOM_CYLINDER,
-            radius=leg_radius,
-            height=lower_leg_length
-        )
-        lower_leg_visual = p.createVisualShape(
-            p.GEOM_CYLINDER,
-            radius=leg_radius,
-            length=lower_leg_length,
-            rgbaColor=[0.8, 0.5, 0.5, 1]
-        )
-        
-        # Create feet
-        foot_collision = p.createCollisionShape(
-            p.GEOM_BOX,
-            halfExtents=[0.1, 0.05, 0.02]
-        )
-        foot_visual = p.createVisualShape(
-            p.GEOM_BOX,
-            halfExtents=[0.1, 0.05, 0.02],
-            rgbaColor=[0.2, 0.2, 0.2, 1]
-        )
-        
-        # Mass properties
-        torso_mass = 9.0
-        leg_mass = 4.0
-        foot_mass = 1.5
-        
-        # Link positions relative to parent
-        hip_offset = 0.15  # Distance from torso center to hip
-        
-        # Create multi-body robot
-        link_masses = [leg_mass, leg_mass, foot_mass, leg_mass, leg_mass, foot_mass]
-        link_collision_shapes = [upper_leg_collision, lower_leg_collision, foot_collision,
-                               upper_leg_collision, lower_leg_collision, foot_collision]
-        link_visual_shapes = [upper_leg_visual, lower_leg_visual, foot_visual,
-                            upper_leg_visual, lower_leg_visual, foot_visual]
-        
-        # Link positions (relative to parent link frame)
-        link_positions = [
-            [hip_offset, 0, -torso_height/2],     # Right upper leg
-            [0, 0, -upper_leg_length/2],          # Right lower leg
-            [0, 0, -lower_leg_length/2],          # Right foot
-            [-hip_offset, 0, -torso_height/2],    # Left upper leg
-            [0, 0, -upper_leg_length/2],          # Left lower leg
-            [0, 0, -lower_leg_length/2]           # Left foot
-        ]
-        
-        # Link orientations
-        link_orientations = [
-            [0, 0, 0, 1],  # Right upper leg
-            [0, 0, 0, 1],  # Right lower leg
-            [0, 0, 0, 1],  # Right foot
-            [0, 0, 0, 1],  # Left upper leg
-            [0, 0, 0, 1],  # Left lower leg
-            [0, 0, 0, 1]   # Left foot
-        ]
-        
-        # Parent indices (-1 for base, then link indices)
-        link_parent_indices = [0, 0, 1, 0, 3, 4]  # 0 is base (torso)
-        
-        # Joint types
-        joint_types = [
-            p.JOINT_REVOLUTE,  # Right hip
-            p.JOINT_REVOLUTE,  # Right knee
-            p.JOINT_FIXED,     # Right foot (fixed to lower leg)
-            p.JOINT_REVOLUTE,  # Left hip
-            p.JOINT_REVOLUTE,  # Left knee
-            p.JOINT_FIXED      # Left foot (fixed to lower leg)
-        ]
-        
-        # Joint axes (rotation axes)
-        joint_axes = [
-            [1, 0, 0],  # Right hip (pitch)
-            [1, 0, 0],  # Right knee (pitch)
-            [0, 0, 0],  # Right foot (no rotation)
-            [1, 0, 0],  # Left hip (pitch)
-            [1, 0, 0],  # Left knee (pitch)
-            [0, 0, 0]   # Left foot (no rotation)
-        ]
-        
-        # Create the robot
-        self.robot_id = p.createMultiBody(
-            baseMass=torso_mass,
-            baseCollisionShapeIndex=torso_collision,
-            baseVisualShapeIndex=torso_visual,
-            basePosition=self.initial_position,
-            baseOrientation=[0, 0, 0, 1],
-            linkMasses=link_masses,
-            linkCollisionShapeIndices=link_collision_shapes,
-            linkVisualShapeIndices=link_visual_shapes,
-            linkPositions=link_positions,
-            linkOrientations=link_orientations,
-            linkInertialFramePositions=[[0, 0, 0]] * 6,
-            linkInertialFrameOrientations=[[0, 0, 0, 1]] * 6,
-            linkParentIndices=link_parent_indices,
-            linkJointTypes=joint_types,
-            linkJointAxis=joint_axes
-        )
-        
-        # Store joint indices for the controllable joints (exclude fixed joints)
-        self.joint_indices = [0, 1, 3, 4]  # Right hip, right knee, left hip, left knee
-        
-        # Set joint limits and damping
-        for joint_index in self.joint_indices:
-            p.changeDynamics(
-                self.robot_id,
-                joint_index,
-                linearDamping=0.1,
-                angularDamping=0.1,
-                jointDamping=0.1
-            )
-            # Set joint limits (approximately human-like)
-            if joint_index in [0, 3]:  # Hip joints
-                p.setJointMotorControl2(
-                    self.robot_id,
-                    joint_index,
-                    p.POSITION_CONTROL,
-                    targetPosition=0,
-                    force=0
-                )
-            else:  # Knee joints
-                p.setJointMotorControl2(
-                    self.robot_id,
-                    joint_index,
-                    p.POSITION_CONTROL,
-                    targetPosition=0,
-                    force=0
-                )
-    
-    def reset(self, seed=None, options=None):
-        """
-        Reset the environment to initial state.
-        
+        Advance all robots by one control step (SimCfg.decimation physics steps).
+
         Returns:
-            observation (np.array): Initial observation
-            info (dict): Additional information
+            obs (N, num_obs) float32, reward (N,) float32, done (N,) bool, info dict.
+            info["time_outs"] marks episodes that ended without the robot falling
+            (timeout / reached the goal); PPO bootstraps the value for those.
+            info["fell"] / info["reached_goal"] say why an episode ended.
+            info["episode"] holds logging statistics of the episodes that just ended.
         """
-        super().reset(seed=seed)
-        
-        self.episode_steps = 0
-        
-        # Reset action tracking for smoothness penalty
-        self.prev_action = None
-        self.current_action = None
-        
-        # Reset robot position and orientation
-        p.resetBasePositionAndOrientation(
-            self.robot_id,
-            self.initial_position,
-            [0, 0, 0, 1]
+        self.actions = np.clip(np.asarray(actions, dtype=np.float64), -ObsCfg.clip_actions, ObsCfg.clip_actions)
+        target = self.default_joint_pos + RobotCfg.action_scale * self.actions
+        np.clip(target, self.joint_lower, self.joint_upper, out=target)
+        self._ctrl[:, 0, :] = target
+
+        # ---- physics: all robots, all cores
+        self._rollout.rollout(
+            self.model, self._datas, self.state, self._ctrl, nstep=SimCfg.decimation,
+            state=self._state_traj, sensordata=self._sensor_traj,
         )
-        
-        # Reset joint positions to neutral stance
-        for joint_index in self.joint_indices:
-            p.resetJointState(self.robot_id, joint_index, 0, 0)
-        
-        # Let the robot settle
-        for _ in range(10):
-            p.stepSimulation()
-        
-        # Get initial observation
-        observation = self._get_observation()
-        self.prev_position = p.getBasePositionAndOrientation(self.robot_id)[0]
-        
-        info = {}
-        return observation, info
-    
-    def step(self, action):
-        """
-        Execute one step in the environment.
-        
-        Args:
-            action (np.array): Actions to take (joint torques)
-            
-        Returns:
-            observation (np.array): New observation
-            reward (float): Reward for this step
-            terminated (bool): Whether episode has ended
-            truncated (bool): Whether episode was truncated
-            info (dict): Additional information
-        """
-        self.episode_steps += 1
-        
-        # Store previous action for smoothness penalty
-        self.prev_action = getattr(self, 'current_action', np.zeros_like(action))
-        self.current_action = np.array(action)
-        
-        # Apply actions (joint-specific torque limits)
-        from config import HIP_MAX_TORQUE, KNEE_MAX_TORQUE
-        
-        for i, joint_index in enumerate(self.joint_indices):
-            if joint_index in [0, 3]:  # Hip joints
-                torque = np.clip(action[i], -HIP_MAX_TORQUE, HIP_MAX_TORQUE)
-            else:  # Knee joints
-                torque = np.clip(action[i], -KNEE_MAX_TORQUE, KNEE_MAX_TORQUE)
-            
-            p.setJointMotorControl2(
-                self.robot_id,
-                joint_index,
-                p.TORQUE_CONTROL,
-                force=torque
-            )
-        
-        # Step the simulation
-        p.stepSimulation()
-        
-        # Get new observation
-        observation = self._get_observation()
-        
-        # Calculate reward
-        reward = self._calculate_reward()
-        
-        # Check if episode should end
-        terminated = self._is_terminated()
-        truncated = self.episode_steps >= self.max_episode_steps
-        
-        info = {
-            'episode_steps': self.episode_steps,
-            'robot_height': observation[14],  # Z position of torso
-        }
-        
-        return observation, reward, terminated, truncated, info
-    
-    def _get_observation(self):
-        """
-        Get the current observation of the robot state.
-        
-        Returns:
-            observation (np.array): Current state observation
-        """
-        # Get joint states
-        joint_states = []
-        for joint_index in self.joint_indices:
-            joint_state = p.getJointState(self.robot_id, joint_index)
-            joint_states.extend([joint_state[0], joint_state[1]])  # position, velocity
-        
-        # Get base position and orientation
-        base_pos, base_orn = p.getBasePositionAndOrientation(self.robot_id)
-        base_orn_euler = p.getEulerFromQuaternion(base_orn)
-        
-        # Get base velocity
-        base_vel, base_ang_vel = p.getBaseVelocity(self.robot_id)
-        
-        # Combine all observations
-        observation = np.array(
-            joint_states +                    # 8 values: 4 joint positions + 4 joint velocities
-            list(base_orn_euler) +           # 3 values: roll, pitch, yaw
-            list(base_pos) +                 # 3 values: x, y, z position
-            list(base_vel),                  # 3 values: linear velocity
-            dtype=np.float32
-        )
-        
-        return observation
-    
-    def _calculate_reward(self):
-        """
-        Calculate the reward for the current state.
-        
-        Returns:
-            reward (float): Calculated reward value
-        """
-        # Get current state
-        current_pos, base_orn = p.getBasePositionAndOrientation(self.robot_id)
-        roll, pitch, yaw = p.getEulerFromQuaternion(base_orn)
-        
-        # Forward progress (balanced)
-        if self.prev_position is not None:
-            forward_progress = current_pos[0] - self.prev_position[0]
-            forward_reward = forward_progress * FORWARD_REWARD_SCALE
-        else:
-            forward_reward = 0
-        
-        # Update previous position
-        self.prev_position = current_pos
-        
-        # Height penalty (smooth)
-        height_penalty = -max(0, FALL_THRESHOLD - current_pos[2]) * 10.0
-        
-        # Stability penalty (balanced)
-        stability_penalty = -(abs(roll) + abs(pitch)) * STABILITY_PENALTY_SCALE
-        
-        # Upright bonus (small)
-        upright_reward = UPRIGHT_REWARD if current_pos[2] > FALL_THRESHOLD else 0
-        
-        # Action smoothness (prevents jittery movements)
-        if hasattr(self, 'prev_action') and hasattr(self, 'current_action') and self.prev_action is not None and self.current_action is not None:
-            action_penalty = -0.01 * np.sum(np.square(self.current_action - self.prev_action))
-        else:
-            action_penalty = 0
-        
-        total_reward = (forward_reward + height_penalty + 
-                       stability_penalty + upright_reward + action_penalty)
-        
-        return total_reward
-    
-    def _is_terminated(self):
-        """
-        Check if the episode should be terminated.
-        
-        Returns:
-            terminated (bool): Whether the episode should end
-        """
-        # Get current position
-        current_pos, _ = p.getBasePositionAndOrientation(self.robot_id)
-        
-        # Episode ends if robot falls
-        if current_pos[2] < FALL_THRESHOLD:
-            return True
-        
-        return False
-    
-    def render(self, mode='human'):
-        """
-        Render the environment (handled automatically by PyBullet if GUI mode).
-        
-        Args:
-            mode (str): Rendering mode
-        """
-        if mode == 'human':
-            # Rendering is handled automatically by PyBullet GUI
-            time.sleep(SIMULATION_TIMESTEP)
-        
+        self.state[:] = self._state_traj[:, -1]
+        sensors = self._sensor_traj[:, -1]
+        # a foot counts as "in contact" if it touched the ground during any physics sub-step
+        self.contact = self._sensor_traj[:, :, _TOUCH].max(axis=1) > 1.0
+        self.foot_pos = sensors[:, _FOOT_POS].reshape(-1, 2, 3)
+        self.foot_vel = sensors[:, _FOOT_VEL].reshape(-1, 2, 3)
+        self.foot_up = sensors[:, _FOOT_UP].reshape(-1, 2, 3)
+
+        self.episode_length += 1
+        self.common_step += 1
+        self._update_kinematics()
+        self._update_commands()
+
+        # ---- termination
+        ground = self.terrain.height(self.base_pos[:, 0], self.base_pos[:, 1])
+        fell = (self.base_pos[:, 2] - ground < RobotCfg.min_height) | \
+               (self.projected_gravity[:, 2] > RobotCfg.max_tilt_gravity_z)
+        fell |= ~np.isfinite(self.state).all(axis=1)
+        dist = self.terrain.distance_from_center(self.base_pos[:, 0], self.base_pos[:, 1], self.env_row, self.env_level)
+        reached_goal = ~self.is_flat & (dist > TerrainCfg.success_distance)
+        left_flat = self.is_flat & (self.terrain.num_rows > 1) & (self.base_pos[:, 1] > self.terrain.tile - 1.0)
+        time_out = (self.episode_length >= self.max_episode_length) | reached_goal | left_flat
+        time_out &= ~fell
+        done = fell | time_out
+
+        reward = self._compute_reward(target, fell)
+
+        # ---- resets (+ curriculum)
+        info = {"time_outs": time_out, "fell": fell, "reached_goal": reached_goal}
+        ids = np.nonzero(done)[0]
+        if ids.size:
+            info["episode"] = self._episode_stats(ids, fell, reached_goal)
+            self._update_curriculum(ids, fell, reached_goal, dist)
+            self._reset_envs(ids)
+
+        if self.push_robots and self.common_step % int(DomainRandCfg.push_interval_s / self.dt) == 0:
+            self._push()
+
+        self.last_actions[:] = self.actions
+        self.last_actions[ids] = 0.0
+        self.actions[ids] = 0.0
+        if ids.size or self.push_robots:
+            self._update_kinematics()
+            self._update_commands()
+        self.last_joint_vel[:] = self.joint_vel
+        return self._compute_obs(), reward.astype(np.float32), done, info
+
+    def write_data(self, index, data):
+        """Copy the state of robot `index` into an MjData (for rendering)."""
+        mujoco.mj_setState(self.model, data, self.state[index], self._state_spec)
+        mujoco.mj_forward(self.model, data)
+
     def close(self):
-        """
-        Clean up the environment.
-        """
-        p.disconnect(self.physics_client)
+        self._rollout.close()
+
+    # ============================================================ internals
+    def _update_kinematics(self):
+        qpos = self.state[:, self._qpos]
+        qvel = self.state[:, self._qvel]
+        self.base_pos = qpos[:, 0:3]
+        self.base_quat = qpos[:, 3:7]
+        self.joint_pos = qpos[:, 7:]
+        self.joint_vel = qvel[:, 6:]
+        self.base_lin_vel_world = qvel[:, 0:3]
+        self.base_lin_vel = quat_rotate_inverse(self.base_quat, qvel[:, 0:3])
+        self.base_ang_vel = qvel[:, 3:6]                    # MuJoCo free joints: already in the body frame
+        self.projected_gravity = quat_rotate_inverse(self.base_quat, self._gravity)
+        w, x, y, z = self.base_quat.T
+        self.yaw = np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+    def _update_commands(self):
+        """Resample speeds / headings when due and turn the heading error into a yaw-rate command."""
+        due = (self.episode_length % int(CommandCfg.resample_time_s / self.dt) == 0) & (self.episode_length > 0)
+        ids = np.nonzero(due)[0]
+        if ids.size and self.resample_commands:
+            self._sample_speed(ids)
+            flat = ids[self.is_flat[ids]]
+            self.heading_target[flat] = self.rng.uniform(-np.pi, np.pi, flat.size)
+        err = wrap_to_pi(self.heading_target - self.yaw)
+        self.commands[:, 2] = np.clip(CommandCfg.heading_gain * err, -CommandCfg.max_yaw_rate, CommandCfg.max_yaw_rate)
+
+    def _sample_speed(self, ids):
+        if self.fixed_speed is not None:
+            self.commands[ids, 0] = self.fixed_speed
+        else:
+            lo, hi = CommandCfg.lin_vel_x
+            self.commands[ids, 0] = self.rng.uniform(lo, hi, ids.size)
+
+    def _reset_envs(self, ids):
+        n = ids.size
+        m = self.model
+        rng = self.rng
+        cx, cy = self.terrain.tile_center(self.env_row[ids], self.env_level[ids])
+        x = cx + rng.uniform(-0.4, 0.4, n)
+        y = cy + rng.uniform(-0.4, 0.4, n)
+
+        # heading: anywhere on flat ground, roughly square-on to the steps on stairs
+        flat = self.is_flat[ids]
+        heading = np.where(
+            flat, rng.uniform(-np.pi, np.pi, n),
+            rng.integers(0, 4, n) * (np.pi / 2) + rng.uniform(-0.25, 0.25, n),
+        )
+        yaw = np.where(flat, rng.uniform(-np.pi, np.pi, n), heading + rng.uniform(-0.3, 0.3, n))
+        self.heading_target[ids] = wrap_to_pi(heading)
+
+        qpos = np.zeros((n, m.nq))
+        qpos[:, 0] = x
+        qpos[:, 1] = y
+        qpos[:, 2] = self.terrain.height(x, y) + RobotCfg.init_height
+        qpos[:, 3] = np.cos(yaw / 2)
+        qpos[:, 6] = np.sin(yaw / 2)
+        noise = DomainRandCfg.init_joint_noise
+        qpos[:, 7:] = np.clip(self.default_joint_pos + rng.uniform(-noise, noise, (n, m.nu)),
+                              self.joint_lower, self.joint_upper)
+        qvel = np.zeros((n, m.nv))
+        qvel[:, 0:6] = rng.uniform(-DomainRandCfg.init_vel_noise, DomainRandCfg.init_vel_noise, (n, 6))
+
+        self.state[ids, 0] = 0.0
+        self.state[ids, self._qpos] = qpos
+        self.state[ids, self._qvel] = qvel
+
+        self._sample_speed(ids)
+        self.episode_length[ids] = 0
+        self.last_actions[ids] = 0.0
+        self.last_joint_vel[ids] = 0.0
+        self.contact[ids] = True
+        for v in self.episode_sums.values():
+            v[ids] = 0.0
+
+    def _push(self):
+        """Random horizontal shove so the policy learns to recover its balance."""
+        v = DomainRandCfg.max_push_vel
+        self.state[:, self._qvel][:, 0:2] += self.rng.uniform(-v, v, (self.num_envs, 2))
+
+    def _update_curriculum(self, ids, fell, reached_goal, dist):
+        """Stairs robots: climbed/descended the whole staircase -> harder level, fell -> easier."""
+        if not self.curriculum or self.terrain.num_levels == 1:
+            return
+        ids = ids[~self.is_flat[ids]]
+        up = reached_goal[ids]
+        down = (fell[ids] | (dist[ids] < 0.5 * TerrainCfg.success_distance)) & ~up
+        level = self.env_level[ids] + up.astype(np.int64) - down.astype(np.int64)
+        # robots that beat the hardest level are sent to a random level to keep practising all of them
+        solved = level >= self.terrain.num_levels
+        level[solved] = self.rng.integers(0, self.terrain.num_levels, int(solved.sum()))
+        self.env_level[ids] = np.clip(level, 0, None)
+
+    def _foot_terrain(self):
+        """Highest terrain point under / just ahead of each foot -> (N, 2)."""
+        c, s = np.cos(self.yaw)[:, None, None], np.sin(self.yaw)[:, None, None]
+        px = self.foot_pos[:, :, 0:1] + c * self._foot_probe
+        py = self.foot_pos[:, :, 1:2] + s * self._foot_probe
+        return self.terrain.height(px, py).max(axis=2)
+
+    def _compute_reward(self, target, fell):
+        cfg = RewardCfg
+        cmd = self.commands
+        terms = {}
+
+        # --- task
+        lin_err = (cmd[:, 0] - self.base_lin_vel[:, 0]) ** 2 + (cmd[:, 1] - self.base_lin_vel[:, 1]) ** 2
+        terms["tracking_lin_vel"] = np.exp(-lin_err / cfg.tracking_sigma)
+        terms["tracking_ang_vel"] = np.exp(-(cmd[:, 2] - self.base_ang_vel[:, 2]) ** 2 / cfg.tracking_sigma)
+        terms["alive"] = 1.0 - fell
+
+        # --- gait: each foot should be on the ground during its half of the gait cycle
+        stance = self._leg_phase() < CommandCfg.stance_fraction
+        terms["gait_contact"] = (self.contact == stance).sum(axis=1)
+        foot_ground = self._foot_terrain()
+        clearance = self.foot_pos[:, :, 2] - foot_ground
+        terms["swing_height"] = (((clearance - cfg.swing_height_target) ** 2) * ~self.contact).sum(axis=1)
+
+        # --- posture
+        terms["lin_vel_z"] = self.base_lin_vel_world[:, 2] ** 2
+        terms["ang_vel_xy"] = (self.base_ang_vel[:, 0:2] ** 2).sum(axis=1)
+        terms["orientation"] = (self.projected_gravity[:, 0:2] ** 2).sum(axis=1)
+        base_height = self.base_pos[:, 2] - foot_ground.mean(axis=1)
+        terms["base_height"] = np.clip(RobotCfg.nominal_height - 0.06 - base_height, 0.0, None) ** 2
+        terms["hip_pos"] = ((self.joint_pos[:, self._hip_idx] - self.default_joint_pos[self._hip_idx]) ** 2).sum(axis=1)
+
+        # --- feet
+        d = self.foot_pos[:, 0, 0:2] - self.foot_pos[:, 1, 0:2]                  # left - right
+        lateral = -np.sin(self.yaw) * d[:, 0] + np.cos(self.yaw) * d[:, 1]
+        terms["feet_distance"] = np.clip(cfg.min_feet_distance - lateral, 0.0, None)
+        terms["foot_flat"] = (self.foot_up[:, :, 0:2] ** 2).sum(axis=(1, 2))
+        terms["feet_slip"] = ((self.foot_vel[:, :, 0:2] ** 2).sum(axis=2) * self.contact).sum(axis=1)
+
+        # --- effort / smoothness
+        torque = np.clip(self.kp * (target - self.joint_pos) - self.kd * self.joint_vel,
+                         -self.torque_limit, self.torque_limit)
+        terms["torques"] = (torque ** 2).sum(axis=1)
+        terms["joint_vel"] = (self.joint_vel ** 2).sum(axis=1)
+        terms["joint_acc"] = (((self.joint_vel - self.last_joint_vel) / self.dt) ** 2).sum(axis=1)
+        terms["action_rate"] = ((self.actions - self.last_actions) ** 2).sum(axis=1)
+        over = np.clip(self.soft_lower - self.joint_pos, 0.0, None) + np.clip(self.joint_pos - self.soft_upper, 0.0, None)
+        terms["joint_limits"] = over.sum(axis=1)
+        terms["termination"] = fell.astype(np.float64)
+
+        reward = np.zeros(self.num_envs)
+        for name, weight in self.reward_weights.items():
+            value = np.nan_to_num(terms[name] * (weight * self.dt), nan=0.0, posinf=0.0, neginf=0.0)
+            reward += value
+            self.episode_sums[name] += value
+        return reward
+
+    def _leg_phase(self):
+        """Gait phase in [0, 1) of the left and right leg (half a cycle apart) -> (N, 2)."""
+        phase = (self.episode_length * self.dt / CommandCfg.gait_period) % 1.0
+        return np.stack([phase, (phase + 0.5) % 1.0], axis=1)
+
+    def _compute_obs(self):
+        c, s = np.cos(self.yaw)[:, None], np.sin(self.yaw)[:, None]
+        px = self.base_pos[:, 0:1] + c * self._scan_x - s * self._scan_y
+        py = self.base_pos[:, 1:2] + s * self._scan_x + c * self._scan_y
+        scan = self.base_pos[:, 2:3] - RobotCfg.nominal_height - self.terrain.height(px, py)
+        phase = 2.0 * np.pi * self._leg_phase()[:, 0:1]
+        obs = np.concatenate([
+            self.base_lin_vel * ObsCfg.lin_vel_scale,
+            self.base_ang_vel * ObsCfg.ang_vel_scale,
+            self.projected_gravity,
+            self.commands,
+            self.joint_pos - self.default_joint_pos,
+            self.joint_vel * ObsCfg.joint_vel_scale,
+            self.actions,
+            np.sin(phase), np.cos(phase),
+            np.clip(scan, -1.0, 1.0) * ObsCfg.height_scale,
+        ], axis=1)
+        return np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+
+    def _episode_stats(self, ids, fell, reached_goal):
+        stats = {f"reward/{k}": float(v[ids].mean()) for k, v in self.episode_sums.items()}
+        stats["episode_length"] = float(self.episode_length[ids].mean())
+        stats["fell"] = float(fell[ids].mean())
+        stairs = ids[~self.is_flat[ids]]
+        if stairs.size:
+            stats["stairs_success"] = float(reached_goal[stairs].mean())
+        if not self.is_flat.all():
+            stats["terrain_level"] = float(self.env_level[~self.is_flat].mean())
+        return stats
 
 
-# Test the environment
+# Quick self-test: random actions, prints the simulation throughput
 if __name__ == "__main__":
-    env = RobotEnv(render_mode=True)
-    
-    print("Testing environment...")
-    print(f"Action space: {env.action_space}")
-    print(f"Observation space: {env.observation_space}")
-    
-    obs, info = env.reset()
-    print(f"Initial observation shape: {obs.shape}")
-    
-    for i in range(100):
-        action = env.action_space.sample()  # Random action
-        obs, reward, terminated, truncated, info = env.step(action)
-        
-        if terminated or truncated:
-            print(f"Episode ended at step {i}")
-            obs, info = env.reset()
-    
+    import time
+
+    env = BipedEnv(num_envs=1024)
+    obs = env.reset()
+    print(f"obs {obs.shape}, actions {env.num_actions}, threads {env.num_threads}, "
+          f"geoms {env.model.ngeom}")
+    steps = 100
+    start = time.time()
+    for _ in range(steps):
+        obs, rew, done, info = env.step(np.random.randn(env.num_envs, env.num_actions) * 0.5)
+    rate = steps * env.num_envs / (time.time() - start)
+    print(f"{rate:,.0f} env steps/s  (mean reward {rew.mean():.4f}, obs finite: {np.isfinite(obs).all()})")
     env.close()
-    print("Environment test completed!")

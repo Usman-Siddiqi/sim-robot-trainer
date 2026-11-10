@@ -1,24 +1,17 @@
-# Physics simulation
-pybullet>=3.2.5
+# Physics simulation (batched multi-threaded rollouts need >= 3.3; developed against 4.0)
+mujoco>=3.3.0
 
-# Reinforcement learning framework
-stable-baselines3[extra]>=2.0.0
+# Neural networks / PPO.
+# IMPORTANT: for the RTX 4050 install the CUDA build FIRST (see README), e.g.
+#   pip install torch --index-url https://download.pytorch.org/whl/cu126
+# A plain "pip install torch" on Windows gives you the CPU-only build.
+torch>=2.2.0
 
-# Deep learning backend
-torch>=1.13.0
-torchvision>=0.14.0
+numpy>=1.26.0
 
-# OpenAI Gym compatibility
-gymnasium>=0.28.0
+# Training curves (optional but recommended)
+tensorboard>=2.14.0
 
-# Numerical computation
-numpy>=1.21.0
-
-# Plotting and visualization
-matplotlib>=3.5.0
-
-# For better progress tracking during training
-tqdm>=4.64.0
-
-# Logging and monitoring
-tensorboard>=2.10.0
+# Only needed for `python main.py record` (video export)
+imageio>=2.30.0
+imageio-ffmpeg>=0.4.9
