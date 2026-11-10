@@ -136,7 +136,7 @@ class PPOCfg:
     # rollout
     num_envs = 2048                 # parallel robots
     num_steps = 24                  # policy steps per robot per iteration
-    max_iterations = 3000
+    max_iterations = 1500           # stairs are solved after ~800; the rest polishes the gait
 
     # networks
     actor_hidden = [512, 256, 128]

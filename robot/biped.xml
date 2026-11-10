@@ -21,11 +21,15 @@
     <flag eulerdamp="disable"/>
   </option>
 
+  <!-- Rendering scale is set by hand: the terrain added at build time is ~100 m wide and would
+       otherwise push the near clipping plane and the shadow map out to that scale. -->
+  <statistic extent="5" center="0 0 0.7"/>
+
   <visual>
     <global offwidth="1280" offheight="720"/>
     <quality shadowsize="4096"/>
     <headlight ambient="0.45 0.45 0.45" diffuse="0.55 0.55 0.55" specular="0.1 0.1 0.1"/>
-    <map znear="0.02"/>
+    <map znear="0.01" zfar="60"/>
   </visual>
 
   <asset>

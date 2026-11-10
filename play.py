@@ -11,6 +11,7 @@ Everything you do with a trained policy:
 """
 
 import os
+import threading
 import time
 
 import mujoco
@@ -41,7 +42,7 @@ def _single_env(policy_path, terrain, level, speed, device, seed):
     return env, policy, device
 
 
-def _tracking_camera(model, distance=3.0, azimuth=110.0, elevation=-12.0):
+def _tracking_camera(model, distance=3.4, azimuth=115.0, elevation=-24.0):
     cam = mujoco.MjvCamera()
     cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
     cam.trackbodyid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "torso")
@@ -80,7 +81,10 @@ def play(policy_path, terrain="stairs_up", level=5, speed=0.6, device="cpu", see
 
     print(f"Playing {policy_path} on '{terrain}' (level {level}, {speed:.1f} m/s). Close the window to stop.")
     print("Keys: UP/DOWN speed, LEFT/RIGHT turn, BACKSPACE restart")
-    with mujoco.viewer.launch_passive(env.model, data, key_callback=on_key) as viewer:
+    threads_before = set(threading.enumerate())
+    viewer = mujoco.viewer.launch_passive(env.model, data, key_callback=on_key)
+    viewer_threads = [t for t in threading.enumerate() if t not in threads_before]
+    try:
         cam = _tracking_camera(env.model)
         viewer.cam.type, viewer.cam.trackbodyid = cam.type, cam.trackbodyid
         viewer.cam.distance, viewer.cam.azimuth, viewer.cam.elevation = cam.distance, cam.azimuth, cam.elevation
@@ -97,7 +101,12 @@ def play(policy_path, terrain="stairs_up", level=5, speed=0.6, device="cpu", see
             env.write_data(0, data)
             viewer.sync()
             time.sleep(max(0.0, env.dt - (time.time() - tick)))
-    env.close()
+    finally:
+        viewer.close()
+        # the viewer shuts down on its own thread; wait for it so Python does not exit underneath it
+        for thread in viewer_threads:
+            thread.join(timeout=10)
+        env.close()
 
 
 def record(policy_path, output="walk.mp4", terrain="stairs_up", level=5, speed=0.6, seconds=12.0,

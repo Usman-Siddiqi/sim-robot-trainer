@@ -98,11 +98,13 @@ class Terrain:
                         rgba = [shade * 0.75 - tint, shade * 0.85 - tint, shade - tint, 1]
                         inner = self.platform + (k - 1) * self.run     # this step starts here
                         top = k * h
-                        # four slabs (+x, -x, +y, -y) reaching from the step edge to the tile border
+                        # four slabs reaching from the step edge to the tile border: the +x / -x
+                        # slabs span the whole tile (and form the corners), the +y / -y slabs fit
+                        # between them so that no two top faces overlap (avoids render flicker)
                         mid, ext = (inner + half) / 2, (half - inner) / 2
                         slabs = [
                             ([cx + mid, cy], [ext, half]), ([cx - mid, cy], [ext, half]),
-                            ([cx, cy + mid], [half, ext]), ([cx, cy - mid], [half, ext]),
+                            ([cx, cy + mid], [inner, ext]), ([cx, cy - mid], [inner, ext]),
                         ]
                         for (px, py), (sx, sy) in slabs:
                             self._add_box(world, [px, py, top / 2], [sx, sy, top / 2], rgba)

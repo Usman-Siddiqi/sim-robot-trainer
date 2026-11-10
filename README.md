@@ -6,6 +6,10 @@ Thousands of robots are simulated in parallel with [MuJoCo](https://mujoco.org/)
 terrain curriculum moves them from flat ground to taller and taller stairs, and a
 from-scratch PPO implementation in PyTorch learns the controller.
 
+![The trained biped climbing 16 cm stairs](docs/stairs_up.gif)
+
+*The bundled pretrained policy climbing the hardest stairs (16 cm steps).*
+
 Built as a reinforcement learning practice project, with the main goal of understanding
 how the robot model, environment design, rewards and training setup affect locomotion.
 
@@ -20,7 +24,7 @@ Tuned for a Ryzen 7 8845HS + RTX 4050 laptop, but it runs on anything (a GPU is 
 
 ## Setup
 
-Python 3.10+.
+Python 3.10+ (developed and tested with Python 3.13, MuJoCo 4.0 and PyTorch 2.15).
 
 ```bash
 git clone https://github.com/Usman-Siddiqi/sim-robot-trainer.git
@@ -63,7 +67,7 @@ It should print `device: cuda (NVIDIA GeForce RTX 4050 ...)`. If it says `cpu`, 
 Watch the bundled pretrained policy climb stairs (no training needed):
 
 ```bash
-python main.py play
+python main.py play --model pretrained/biped_stairs.pt
 ```
 
 Train the full task (flat ground + stairs up + stairs down):
@@ -123,7 +127,19 @@ The defaults in `config.py` are chosen for this laptop:
 | networks | 512-256-128 MLPs on the GPU | one batched forward pass per control step, PPO update on ~12k-sample minibatches |
 | physics / control rate | 200 Hz / 50 Hz | 4 physics steps per policy step |
 
-What to expect: flat-ground walking appears after roughly 100-150 iterations (~5-7 million steps), the stairs curriculum needs on the order of 1500-2000 iterations. `python main.py bench` tells you how long an iteration takes on your machine.
+What to expect (one iteration = 2048 robots x 24 steps = 49,152 simulation steps):
+
+| Iterations | Steps | What the robot can do |
+| --- | --- | --- |
+| ~100 | 5 M | stays upright and starts stepping |
+| ~150 | 7 M | walks on flat ground at the commanded speed |
+| ~400 | 20 M | climbs 10 cm steps |
+| ~500 | 25 M | first successful climbs of the hardest (16 cm) stairs |
+| ~800 | 40 M | 99-100 % success on every terrain and level |
+
+These numbers are from an actual run of `python main.py train` with the default settings and seed. That run was done on a 4-core cloud CPU without a GPU (about 4.5 s per iteration, one hour to iteration 800); the 8845HS has four times the threads and much faster cores, and the 4050 takes the PPO update off the CPU, so expect it to be several times faster. `python main.py bench` tells you the simulation speed on your machine.
+
+The default run length is 1500 iterations; the extra iterations after ~800 only make the gait smoother. Stop early with `Ctrl+C` whenever `python main.py eval` looks good enough.
 
 Tips:
 
@@ -140,13 +156,25 @@ tensorboard --logdir logs
 
 Useful curves: `train/mean_return`, `episode/terrain_level` (curriculum progress), `episode/stairs_success`, `episode/fell` and the individual reward terms under `episode/reward/*`.
 
-The console prints one line every 10 iterations:
+The console prints one line every 10 iterations (this one is from the 4-core CPU-only reference run):
 
 ```text
-it   400/2000 | 120,000 steps/s (sim 0.3s, learn 0.1s) | return 45.86 | ep len 1000.0 | fell 0.00 | stairs lvl 3.2 ok 0.81 | std 0.28 | lr 2e-04 | eta 12.0 min
+it   800/2000 |  11,588 steps/s (sim  1.9s, learn  2.3s) | return   18.41 | ep len  431.1 | fell 0.00 | stairs lvl 6.05 ok 1.00 | std 0.32 | lr 2e-04 | eta  96.8 min
 ```
 
-`stairs lvl` is the average curriculum level of the stairs robots (0 = 3 cm steps, 9 = 16 cm steps) and `ok` is the fraction of stairs episodes that reached the end of the staircase.
+`stairs lvl` is the average curriculum level of the stairs robots (0 = 3 cm steps, 9 = 16 cm steps) and `ok` is the fraction of stairs episodes that reached the end of the staircase. Because robots that beat level 9 are sent back to a random level, a policy that has mastered the stairs hovers around level 6 with `ok` near 1.00. Episodes on stairs end as soon as the robot reaches the goal, so `return` and `ep len` are lower than on flat ground - that is expected.
+
+## Pretrained policy
+
+`pretrained/biped_stairs.pt` is the result of `python main.py train` (default settings, seed 0) stopped at iteration 1000 (49 million steps). `python main.py eval --model pretrained/biped_stairs.pt --num_envs 4000`:
+
+| Terrain | Step height | Success | Fell |
+| --- | --- | --- | --- |
+| flat | - | 100 % | 0 % |
+| stairs up, levels 0-9 | 3.0 - 16.0 cm | 99 - 100 % | 0 - 1 % |
+| stairs down, levels 0-9 | 3.0 - 16.0 cm | 99 - 100 % | 0 - 1 % |
+
+Success means walking for the full 20 s on flat ground, or getting all the way up / down the 8-step staircase. The average speed tracking error is 0.04 - 0.07 m/s. You can also continue training from it: `python main.py train --resume pretrained/biped_stairs.pt`.
 
 ## How it works
 
@@ -175,6 +203,7 @@ sim-robot-trainer/
 ├── play.py           viewer, video recording, evaluation
 ├── robot/biped.xml   the robot model (MJCF)
 ├── pretrained/       a trained policy to try out
+├── docs/             images for this README
 ├── models/           your checkpoints (created by training)
 └── logs/             TensorBoard logs (created by training)
 ```
