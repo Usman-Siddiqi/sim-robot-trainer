@@ -3,160 +3,152 @@ showcase.py
 
 Author: Usman Siddiqi
 
-Records a captioned video of a policy in several scenarios: terrains it was
-trained on, then terrains and physics it never saw in training.
+Records one captioned video of the trained policies in several scenarios:
+hiking trails (training trails, then trails and conditions the policy never
+trained on) and box sorting (normal boxes, then boxes heavier than any in
+training).
 
-    python showcase.py                                  # pretrained policy -> docs/showcase.mp4
-    python showcase.py --model models/<run>/model_final.pt --output my_run.mp4
+    python showcase.py                              # bundled policies -> docs/showcase.mp4
+    python showcase.py --only hike --output hike.mp4
+    python showcase.py --hike models/my_run/model_final.pt
 
-Needs: pip install imageio imageio-ffmpeg   (Pillow comes with imageio)
+Needs: pip install imageio imageio-ffmpeg pillow
+On a machine without a display set MUJOCO_GL=egl first.
 """
+
 import argparse
 import os
 
 import imageio
-import mujoco
 import numpy as np
-import torch
 from PIL import Image, ImageDraw, ImageFont
 
-from agent import load_policy
-from config import EvalCfg, TerrainCfg
-from environment import BipedEnv
-from play import _tracking_camera
+from main import PRETRAINED
+from play import Scene, load, make_scene, render_episode
 
 W, H, FPS = 960, 544, 25
 
-
-def font(size, bold=False):
-    """DejaVu (Linux), Arial (Windows) or Helvetica (macOS), else Pillow's built-in font."""
-    names = (["DejaVuSans-Bold.ttf", "arialbd.ttf", "Arial Bold.ttf", "Helvetica-Bold.ttc"] if bold else
-             ["DejaVuSans.ttf", "arial.ttf", "Arial.ttf", "Helvetica.ttc"])
-    for name in names:
-        for path in (name, f"/usr/share/fonts/truetype/dejavu/{name}", f"/Library/Fonts/{name}",
-                     f"/System/Library/Fonts/{name}"):
-            try:
-                return ImageFont.truetype(path, size)
-            except OSError:
-                pass
-    return ImageFont.load_default(size=size)
-
-
-f_title, f_sub, f_tag, f_big = font(30, True), font(20), font(16, True), font(44, True)
-ROWS = {r["name"]: r for r in TerrainCfg.rows + EvalCfg.unseen_terrains}
-
-SCENARIOS = [
-    dict(title="Walking + turning on command", sub="flat ground, 0.7 m/s, heading changes every 3 s",
-         tag="TRAINED", terrain="flat", level=0, speed=0.7, seconds=10, turns=True),
-    dict(title="Climbing stairs", sub="hardest level: 16 cm steps",
-         tag="TRAINED", terrain="stairs_up", level=9, speed=0.6, seconds=14),
-    dict(title="Walking down stairs", sub="hardest level: 16 cm steps",
-         tag="TRAINED", terrain="stairs_down", level=9, speed=0.6, seconds=14),
-    dict(title="Irregular stairs", sub="every step a different height and depth",
-         tag="NEVER SEEN IN TRAINING", terrain="irregular_stairs_up", level=9, speed=0.6, seconds=14),
-    dict(title="Scattered blocks", sub="random blocks up to 13 cm",
-         tag="NEVER SEEN IN TRAINING", terrain="scattered_blocks", level=9, speed=0.6, seconds=12),
-    dict(title="Rolling hills", sub="waves up to 35 cm peak to peak",
-         tag="NEVER SEEN IN TRAINING", terrain="waves", level=9, speed=0.6, seconds=12),
-    dict(title="Getting shoved", sub="0.8 m/s kick every 3 s (training: 0.5 m/s every 5 s)",
-         tag="NEVER SEEN IN TRAINING", terrain="flat", level=0, speed=0.6, seconds=12,
-         push=dict(max_push_vel=0.8, push_interval_s=3.0)),
-    dict(title="Stairs while overloaded", sub="+6 kg payload and 80 % motor strength",
-         tag="NEVER SEEN IN TRAINING", terrain="stairs_up", level=9, speed=0.6, seconds=14,
-         physics=dict(payload=6.0, motor_strength=0.8)),
+HIKE = [
+    dict(title="Rock steps", sub="irregular steps up and down, up to 20 cm", tag="TRAINED",
+         terrain="climb", level=9, speed=0.6),
+    dict(title="Stepping stones", sub="zigzag stones with 25 cm gaps - miss one and it is a 1 m drop", tag="TRAINED",
+         terrain="stones", level=9, speed=0.6),
+    dict(title="Ridge and boulders", sub="50 cm wide ridge", tag="TRAINED",
+         terrain="ridge", level=9, speed=0.6),
+    dict(title="The full hike", sub="everything mixed, hardest level", tag="TRAINED",
+         terrain="trail", level=9, speed=0.7),
+    dict(title="A trail it has never walked", sub="new layout with logs, terraces and rubble it never trained on",
+         tag="NEVER SEEN IN TRAINING", terrain="new_trail", level=8, speed=0.6),
+    dict(title="Switchbacks", sub="swings left / right 60 % further than any training trail",
+         tag="NEVER SEEN IN TRAINING", terrain="switchbacks", level=8, speed=0.6),
+    dict(title="Hiking with a heavy backpack, getting shoved", sub="+5 kg, weak motors, a shove every 4 s",
+         tag="NEVER SEEN IN TRAINING", terrain="trail", level=7, speed=0.6,
+         physics=dict(payload=5.0, motor_strength=0.85), push=dict(max_push_vel=0.6, push_interval_s=4.0)),
+]
+SORT = [
+    dict(title="Sorting boxes by colour", sub="each box goes to the table of its colour", tag="TRAINED", seed=0),
+    dict(title="Sorting boxes by colour", sub="another round: colours and weights are random", tag="TRAINED", seed=5),
+    dict(title="Boxes heavier than any in training", sub="6.5 - 8 kg (training: 1.5 - 6 kg)",
+         tag="NEVER SEEN IN TRAINING", seed=2, box_mass=(6.5, 8.0)),
 ]
 
 
-def caption(img, sc, extra=None):
-    im = Image.fromarray(img)
+def _font(size, bold=False):
+    names = ["DejaVuSans-Bold.ttf", "arialbd.ttf", "Arial Bold.ttf"] if bold else ["DejaVuSans.ttf", "arial.ttf", "Arial.ttf"]
+    for name in names + ["/usr/share/fonts/truetype/dejavu/" + names[0]]:
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    return ImageFont.load_default(size)
+
+
+F_TITLE, F_SUB, F_TAG, F_BIG = _font(30, True), _font(20), _font(16, True), _font(40, True)
+
+
+def caption(frame, sc, note=None, flash=None):
+    im = Image.fromarray(frame)
     d = ImageDraw.Draw(im, "RGBA")
     d.rectangle([0, 0, W, 84], fill=(15, 18, 24, 175))
-    d.text((20, 10), sc["title"], font=f_title, fill=(255, 255, 255))
-    d.text((20, 50), sc["sub"], font=f_sub, fill=(205, 212, 222))
+    d.text((20, 10), sc["title"], font=F_TITLE, fill=(255, 255, 255))
+    d.text((20, 50), sc["sub"], font=F_SUB, fill=(205, 212, 222))
     color = (60, 160, 90, 235) if sc["tag"] == "TRAINED" else (210, 110, 40, 235)
-    tw = d.textlength(sc["tag"], font=f_tag)
+    tw = d.textlength(sc["tag"], font=F_TAG)
     d.rounded_rectangle([W - tw - 40, 26, W - 16, 58], 8, fill=color)
-    d.text((W - tw - 28, 33), sc["tag"], font=f_tag, fill=(255, 255, 255))
-    if extra:
-        tw = d.textlength(extra, font=f_big)
-        d.text(((W - tw) / 2, H - 90), extra, font=f_big, fill=(255, 220, 60), stroke_width=3, stroke_fill=(0, 0, 0))
+    d.text((W - tw - 28, 33), sc["tag"], font=F_TAG, fill=(255, 255, 255))
+    if note:
+        tw = d.textlength(note, font=F_SUB)
+        d.rounded_rectangle([16, H - 48, 36 + tw, H - 14], 8, fill=(15, 18, 24, 175))
+        d.text((26, H - 43), note, font=F_SUB, fill=(255, 255, 255))
+    if flash:
+        tw = d.textlength(flash, font=F_BIG)
+        d.text(((W - tw) / 2, H - 110), flash, font=F_BIG, fill=(255, 220, 60), stroke_width=3, stroke_fill=(0, 0, 0))
     return np.asarray(im)
 
 
 def title_card(lines, seconds=2.4):
     im = Image.new("RGB", (W, H), (18, 22, 30))
     d = ImageDraw.Draw(im)
-    y = H / 2 - 40 * len(lines) / 2
+    y = H / 2 - 26 * len(lines)
     for text, font, color in lines:
-        tw = d.textlength(text, font=font)
-        d.text(((W - tw) / 2, y), text, font=font, fill=color)
-        y += 52
+        d.text(((W - d.textlength(text, font=font)) / 2, y), text, font=font, fill=color)
+        y += 56
     return [np.asarray(im)] * int(seconds * FPS)
 
 
-def record(sc, seed=0):
-    flat = dict(TerrainCfg.flat_rows[0], weight=0.0)
-    rows = [dict(ROWS["flat"], weight=1.0)] if sc["terrain"] == "flat" else [flat, dict(ROWS[sc["terrain"]], weight=1.0)]
-    env = BipedEnv(num_envs=1, flat_only=sc["terrain"] == "flat", num_threads=1, seed=seed,
-                   terrain_rows=None if sc["terrain"] == "flat" else rows, terrain_seed=seed,
-                   curriculum=False, fixed_level=sc["level"], randomize=False,
-                   physics=sc.get("physics"), push=sc.get("push"),
-                   fixed_speed=sc["speed"], resample_commands=False)
-    data = mujoco.MjData(env.model)
-    renderer = mujoco.Renderer(env.model, H, W)
-    cam = _tracking_camera(env.model)
-    obs = env.reset()
-    every = int(round(1.0 / FPS / env.dt))
-    frames, outcome, flash = [], "time is up", 0
-    turn_every = int(3.0 / env.dt)
-    for step in range(int(sc["seconds"] / env.dt)):
-        if sc.get("turns") and step > 0 and step % turn_every == 0:
-            env.heading_target[0] += np.radians(70) * (1 if (step // turn_every) % 2 else -1)
-        actions = policy.act_inference(torch.from_numpy(obs))
-        obs, _, done, info = env.step(actions.numpy())
-        if sc.get("push") and env.common_step % env.push_interval == 0:
-            flash = int(0.8 / env.dt)
-        if done[0]:
-            outcome = "fell" if info["fell"][0] else ("reached the goal" if info["reached_goal"][0] else outcome)
-            break
-        if step % every == 0:
-            env.write_data(0, data)
-            renderer.update_scene(data, camera=cam)
-            frames.append(caption(renderer.render(), sc, "SHOVE!" if flash > 0 else None))
-        flash -= 1
-    renderer.close()
+def record_scenario(policy, task, device, sc, seed):
+    env = make_scene(task, sc.get("terrain", "trail"), sc.get("level", 5), sc.get("speed", 0.6),
+                     seed=sc.get("seed", seed), physics=sc.get("physics"), push=sc.get("push"), box_mass=sc.get("box_mass"))
+    scene = Scene(policy, env, device)
+    state = {"flash": None, "left": 0}
+
+    def on_frame(frame, scene, event):
+        if event:
+            state["flash"], state["left"] = event.upper() + "!", int(1.2 * FPS)
+        if sc.get("push") and env.common_step % env.push_interval < 2:
+            state["flash"], state["left"] = "SHOVE!", int(0.8 * FPS)
+        state["left"] -= 1
+        note = None
+        if task == "sort":
+            note = f"this box: {env.box_masses[env.box_mass_index[0]]:.1f} kg   sorted so far: {len(scene.sorted_boxes)}"
+        return caption(frame, sc, note, state["flash"] if state["left"] > 0 else None)
+
+    frames, events = render_episode(scene, sc.get("seconds", env.episode_length_s), W, H, FPS, on_frame=on_frame)
     env.close()
-    frames += [frames[-1]] * int(0.6 * FPS)        # hold the last frame briefly
-    return frames, outcome
+    if events:                                              # show how it ended on the last frame for a moment
+        frames += [caption(frames[-1], dict(sc), None, events[-1].upper() + "!")] * int(1.0 * FPS)
+    return frames, events
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Record a captioned showcase video of a trained policy")
-    parser.add_argument("--model", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "pretrained", "biped.pt"))
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--hike", default=PRETRAINED["hike"], help="hike checkpoint")
+    parser.add_argument("--sort", default=PRETRAINED["sort"], help="sort checkpoint")
+    parser.add_argument("--only", choices=["hike", "sort"], default=None)
     parser.add_argument("--output", default=os.path.join("docs", "showcase.mp4"))
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
-    global policy
-    policy, _ = load_policy(args.model, torch.device("cpu"))
-    policy.eval()
-
-    all_frames = title_card([("Sim Robot Trainer", font(46, True), (255, 255, 255)),
-                             ("12-DoF biped, PPO policy trained in MuJoCo", f_sub, (200, 208, 220)),
-                             ("one policy, no retuning between clips", f_sub, (200, 208, 220))])
-    for i, sc in enumerate(SCENARIOS):
-        if i == 3:
-            all_frames += title_card([("Now: things it never trained on", font(38, True), (240, 150, 70)),
-                                      ("new terrain shapes and physics outside the training ranges", f_sub, (200, 208, 220))],
-                                     seconds=2.0)
-        frames, outcome = record(sc, args.seed)
-        print(f"{sc['title']:<32} {outcome:<17} {len(frames) / FPS:5.1f} s", flush=True)
-        all_frames += frames
-
+    grey = (200, 208, 220)
+    frames = title_card([("Sim Robot Trainer", _font(46, True), (255, 255, 255)),
+                         ("20-DoF humanoid, PPO policies trained in MuJoCo", F_SUB, grey)])
+    for task, path, scenarios, intro in [
+            ("hike", args.hike, HIKE, "Task 1: hiking"), ("sort", args.sort, SORT, "Task 2: sorting boxes by colour")]:
+        if args.only not in (None, task):
+            continue
+        if not os.path.exists(path):
+            print(f"no {task} model at {path} - skipped")
+            continue
+        policy, _, device = load(path)
+        frames += title_card([(intro, _font(38, True), (240, 150, 70)), ("one policy for all clips", F_SUB, grey)], 1.8)
+        for sc in scenarios:
+            clip, events = record_scenario(policy, task, device, sc, args.seed)
+            print(f"{sc['title']:<46} {len(clip) / FPS:5.1f} s   {', '.join(events) or 'time is up'}", flush=True)
+            frames += clip
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
-    imageio.mimsave(args.output, all_frames, fps=FPS, codec="libx264", quality=7, macro_block_size=16,
-                    ffmpeg_params=["-movflags", "+faststart"])
-    print(f"saved {args.output}: {len(all_frames) / FPS:.1f} s, {os.path.getsize(args.output) / 1e6:.1f} MB")
+    imageio.mimsave(args.output, frames, fps=FPS, codec="libx264", quality=7, macro_block_size=16,
+                    ffmpeg_params=["-pix_fmt", "yuv420p", "-movflags", "+faststart"])
+    print(f"saved {args.output}: {len(frames) / FPS:.1f} s, {os.path.getsize(args.output) / 1e6:.1f} MB")
 
 
 if __name__ == "__main__":

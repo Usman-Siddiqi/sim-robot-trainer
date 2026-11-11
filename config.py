@@ -3,9 +3,10 @@ config.py
 
 Author: Usman Siddiqi
 
-Every tunable number of the project lives here: simulation, robot, terrain,
-commands, rewards and PPO hyperparameters. The defaults are tuned for a
-Ryzen 7 8845HS (8 cores / 16 threads) + RTX 4050 laptop:
+Every tunable number of the project lives here: simulation, robot, the two
+tasks (hike and sort), domain randomisation, rewards and PPO hyperparameters.
+The defaults are tuned for a Ryzen 7 8845HS (8 cores / 16 threads) + RTX 4050
+laptop:
 
   * physics runs on the CPU, batched over all hardware threads (MuJoCo rollout)
   * the neural networks (policy inference + PPO updates) run on the GPU
@@ -16,12 +17,13 @@ override the most common ones (number of envs, iterations, device, ...).
 
 import os
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
 
 class SimCfg:
-    model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "robot", "biped.xml")
+    model_path = os.path.join(_HERE, "robot", "humanoid.xml")
     timestep = 0.005            # physics step [s] (200 Hz)
     decimation = 4              # physics steps per policy step -> 50 Hz control
-    episode_length_s = 20.0     # episode timeout [s]
 
     @classmethod
     def control_dt(cls):
@@ -29,75 +31,115 @@ class SimCfg:
 
 
 class RobotCfg:
-    # Order must match the actuator order in robot/biped.xml
+    # Order must match the actuator order in robot/humanoid.xml
     joint_names = [
         "l_hip_yaw", "l_hip_roll", "l_hip_pitch", "l_knee", "l_ankle_pitch", "l_ankle_roll",
         "r_hip_yaw", "r_hip_roll", "r_hip_pitch", "r_knee", "r_ankle_pitch", "r_ankle_roll",
+        "l_shoulder_pitch", "l_shoulder_roll", "l_shoulder_yaw", "l_elbow",
+        "r_shoulder_pitch", "r_shoulder_roll", "r_shoulder_yaw", "r_elbow",
     ]
+    num_leg_joints = 12
     # Nominal standing pose (slightly crouched) [rad]. Actions are offsets from it.
-    default_joint_pos = [
+    default_leg_pos = [
         0.0, 0.0, -0.3, 0.6, -0.3, 0.0,
         0.0, 0.0, -0.3, 0.6, -0.3, 0.0,
     ]
+    # arms hanging next to the body, elbows slightly bent (hiking)
+    default_arm_pos = [0.15, 0.12, 0.0, -0.5, 0.15, -0.12, 0.0, -0.5]
+    # forearms pointing forward, palms facing each other (box handling)
+    carry_arm_pos = [-0.25, 0.10, 0.0, -1.35, -0.25, -0.10, 0.0, -1.35]
     init_height = 0.79          # torso height above the ground at reset [m]
     nominal_height = 0.76       # torso height when standing in the default pose [m]
-    action_scale = 0.3          # joint target = default + action_scale * action [rad]
+    leg_action_scale = 0.3      # joint target = default + action_scale * action [rad]
+    arm_action_scale = 0.4
 
     # Episode ends (robot "fell") when:
-    min_height = 0.40           # torso lower than this above the terrain [m]
+    min_height = 0.40           # torso lower than this above the ground under it / its feet [m]
     max_tilt_gravity_z = -0.5   # projected gravity z above this (torso tilted > 60 deg)
 
 
-class TerrainCfg:
-    """
-    The world is a grid of square tiles: one row per terrain type, one column
-    per difficulty level. Every simulated robot lives in its own copy of the
-    world, so robots never collide with each other and tiles can be shared.
+class GaitCfg:
+    period = 0.7                # full left+right step cycle [s]
+    stance_fraction = 0.55      # fraction of the cycle each foot should be on the ground
+    stand_speed = 0.1           # below this commanded speed the robot should stand with both feet down
 
-    `rows` lists the terrains the policy TRAINS on. Parameters given as a
-    (first level, last level) pair grow with the curriculum level; "run" is a
-    range that is sampled randomly per tile. See terrain.py for the generators.
-    The held-out test terrains live in EvalCfg below.
+
+# ======================================================================== HIKE
+class HikeCfg:
     """
-    tile_size = 10.0                # [m]
-    platform_half = 1.0             # half size of the flat spawn platform [m]
-    obstacle_extent = 2.6           # stairs / slopes reach this far beyond the platform [m]
+    Task 1: hiking. The robot follows a winding mountain trail from one end of a
+    tile to the other. The trail is a raised path made of rock columns: fall off
+    the side (or into a gap) and the episode is over.
+
+    The world is a set of tiles: one row per kind of trail ("biome"), one column
+    per difficulty level. Every simulated robot lives in its own copy of one
+    tile, so robots never collide with each other.
+
+    `rows` lists what the policy TRAINS on. `sections` are the building blocks a
+    trail of that row is assembled from (see terrain.py). The held-out test
+    trails live in EvalCfg below.
+    """
+    episode_length_s = 25.0
+    tile_length = 12.0              # along the trail (x) [m]
+    tile_width = 8.0                # across (y) [m]
+    cell = 0.125                    # trails are built from square rock columns of this size [m]
+    start_x = -5.4                  # robots start here (tile coordinates, the tile centre is 0) [m]
+    goal_x = 5.25                   # ... and have made it when they get here
+    base_elevation = 1.0            # height of the trail above the surrounding ground at the start [m]
+    elevation_range = (0.6, 2.6)    # the trail climbs / descends within these heights [m]
     num_levels = 10                 # curriculum levels
-    success_distance = 4.0          # distance from the tile centre that counts as "made it" [m]
     max_init_level = 1              # robots start on levels 0..max_init_level
     curriculum = True
+    lookahead = 0.75                # the robot steers towards the trail centre this far ahead [m]
+    off_trail_margin = 0.6          # further than this beyond the trail edge = left the trail [m]
+
+    # Difficulty: every pair is (level 0, last level)
+    winding = (0.2, 1.6)            # how far the trail swings left / right [m]
+    half_width = (1.5, 0.6)         # half the width of the trail [m]
+    ridge_half_width = (0.7, 0.25)  # ... on ridge sections
+    step_rise = (0.04, 0.20)        # rock steps [m]
+    rough_height = (0.02, 0.10)     # bumps on rough sections, peak to peak [m]
+    stone_gap = (0.0, 0.25)         # gap between stepping stones [m]
+    stone_half_width = (0.6, 0.25)
+    stone_zigzag = (0.0, 0.3)       # stepping stones alternate this far left / right of the trail [m]
+    boulders = (1, 5)               # boulders per boulder section
+    boulder_clearance = (0.7, 0.42) # free space between the trail centre and a boulder [m]
 
     rows = [
         dict(name="flat", kind="flat", weight=0.10),
-        dict(name="rough", kind="rough", weight=0.10, height=(0.02, 0.08)),
-        # two rows each, so every step height is seen with different tread depths
-        dict(name="stairs_up", kind="stairs", weight=0.15, direction="up", rise=(0.03, 0.16), run=(0.26, 0.40)),
-        dict(name="stairs_up", kind="stairs", weight=0.15, direction="up", rise=(0.03, 0.16), run=(0.26, 0.40)),
-        dict(name="stairs_down", kind="stairs", weight=0.10, direction="down", rise=(0.03, 0.16), run=(0.26, 0.40)),
-        dict(name="stairs_down", kind="stairs", weight=0.10, direction="down", rise=(0.03, 0.16), run=(0.26, 0.40)),
-        dict(name="slope_up", kind="slope", weight=0.15, direction="up", slope=(0.05, 0.40), roughness=0.01),
-        dict(name="slope_down", kind="slope", weight=0.15, direction="down", slope=(0.05, 0.40), roughness=0.01),
+        dict(name="rocky", kind="trail", weight=0.15, sections=["rough", "steps", "flat"]),
+        dict(name="climb", kind="trail", weight=0.15, sections=["steps_up", "steps_up", "steps_down", "steps_down", "flat"]),
+        dict(name="stones", kind="trail", weight=0.15, sections=["stones", "stones", "flat", "rough"]),
+        dict(name="ridge", kind="trail", weight=0.15, sections=["ridge", "boulders", "ridge", "rough"]),
+        # the real thing: everything mixed (two rows, so there are twice as many different trails)
+        dict(name="trail", kind="trail", weight=0.15,
+             sections=["rough", "steps", "steps_up", "steps_down", "stones", "ridge", "boulders"]),
+        dict(name="trail", kind="trail", weight=0.15,
+             sections=["rough", "steps", "steps_up", "steps_down", "stones", "ridge", "boulders"]),
     ]
     flat_rows = [dict(name="flat", kind="flat", weight=1.0)]
 
-
-class CommandCfg:
-    lin_vel_x = [0.3, 0.9]          # commanded forward speed range [m/s]
+    # commands
+    speed = [0.4, 0.9]              # commanded walking speed [m/s]
+    max_side_speed = 0.3            # [m/s]
     max_yaw_rate = 1.0              # [rad/s]
-    heading_gain = 1.0              # yaw rate command = gain * heading error
-    heading_noise = 0.5             # obstacles are approached up to this far from square-on [rad]
-    resample_time_s = 6.0           # speed (and heading on flat ground) is resampled this often
-    gait_period = 0.7               # full left+right step cycle [s]
-    stance_fraction = 0.55          # fraction of the cycle each foot should be on the ground
+    heading_gain = 1.5              # yaw rate command = gain * heading error
+    resample_time_s = 5.0           # on flat ground: new speed / direction this often
+    stand_probability = 0.1         # on flat ground: share of commands that are "stand still"
+    crab_angle = 0.5                # on flat ground: walk up to this far off the facing direction [rad]
+
+    # Height scan: terrain height sampled on a grid around the robot (in its heading frame)
+    scan_x = [-0.30 + 0.09 * i for i in range(16)]      # -0.30 .. 1.05 m
+    scan_y = [-0.40 + 0.10 * i for i in range(9)]       # -0.40 .. 0.40 m
 
 
 class DomainRandCfg:
     """
     Randomisation during training, so the policy cannot rely on one exact
-    simulator. `num_variants` copies of the model are built with different
-    physical parameters and the robots are spread over them.
+    simulator. Several copies of every model are built with different physical
+    parameters and the robots are spread over them.
     """
-    num_variants = 32
+    variants_per_tile = 6
     friction = [0.5, 1.25]          # ground / foot friction coefficient
     payload = [-1.0, 3.0]           # extra torso mass [kg]
     com_offset = 0.03               # torso centre of mass shift, +- [m]
@@ -117,57 +159,55 @@ class DomainRandCfg:
     noise_joint_pos = 0.01          # [rad]
     noise_joint_vel = 1.0           # [rad/s]
     noise_height_scan = 0.03        # [m]
+    noise_object_pos = 0.01         # [m] (sorting: box and table positions)
 
 
 class EvalCfg:
     """
     Held-out test conditions for `python main.py eval`. NOTHING in here is used
-    for training: the terrains are different generators or parameter ranges,
-    and the physics values lie outside the DomainRandCfg ranges.
+    for training: the trails are built from sections the policy never saw (or
+    lie outside the training ranges), and the physics values lie outside the
+    DomainRandCfg ranges.
     """
-    unseen_terrains = [
+    unseen_rows = [
         dict(name="flat", kind="flat", weight=0.0),
-        # every step with its own random height and depth
-        dict(name="irregular_stairs_up", kind="irregular_stairs", direction="up",
-             rise=(0.04, 0.15), rise_jitter=(0.6, 1.25), run=(0.24, 0.45)),
-        dict(name="irregular_stairs_down", kind="irregular_stairs", direction="down",
-             rise=(0.04, 0.15), rise_jitter=(0.6, 1.25), run=(0.24, 0.45)),
-        # steeper than anything in training: shorter treads (25 cm) and taller steps (up to 18 cm)
-        dict(name="steep_stairs_up", kind="stairs", direction="up", rise=(0.04, 0.18), run=(0.25, 0.25)),
-        dict(name="steep_stairs_down", kind="stairs", direction="down", rise=(0.04, 0.18), run=(0.25, 0.25)),
-        # flights of three steps with landings in between
-        dict(name="landing_stairs_up", kind="landing_stairs", direction="up", rise=(0.04, 0.16),
-             run=0.275, landing=0.9, flights=2, steps_per_flight=3),
-        # a ramp that turns into stairs
-        dict(name="ramp_then_stairs", kind="ramp_stairs", slope=(0.05, 0.35), rise=(0.04, 0.15),
-             run=0.30, ramp_length=1.2),
-        # randomly scattered blocks to step on and off
-        dict(name="scattered_blocks", kind="blocks", height=(0.03, 0.13), count=40),
-        # rolling hills
-        dict(name="waves", kind="waves", height=(0.05, 0.35), wavelength=2.5),
-        # slopes and bumps beyond the training range
-        dict(name="steep_slope_up", kind="slope", direction="up", slope=(0.30, 0.50)),
-        dict(name="steep_slope_down", kind="slope", direction="down", slope=(0.30, 0.50)),
-        dict(name="very_rough", kind="rough", height=(0.06, 0.12)),
+        # logs across the trail to step over
+        dict(name="logs", kind="trail", sections=["logs", "logs", "rough"]),
+        # the left and right half of the trail at different heights
+        dict(name="terraces", kind="trail", sections=["terraces", "terraces", "flat"]),
+        # loose rubble: smaller and taller bumps than the training "rough"
+        dict(name="rubble", kind="trail", sections=["rubble"]),
+        # regular staircases, steeper than the irregular rock steps of training
+        dict(name="staircase", kind="trail", sections=["stairs_up", "stairs_down"], step_rise=(0.05, 0.22)),
+        # switchbacks: swings left / right 60 % further than any training trail
+        dict(name="switchbacks", kind="trail", sections=["rough", "ridge", "steps"], winding=(0.6, 2.5)),
+        # all the training sections plus the new ones, on trails it has never walked
+        dict(name="new_trail", kind="trail",
+             sections=["rough", "steps", "stones", "ridge", "boulders", "logs", "terraces", "rubble", "stairs_up"]),
     ]
-    # run on the training terrains, with physics / commands the policy never experienced
+    unseen_seed = 1234
+    # the training trails, with physics / disturbances the policy never experienced
     unseen_conditions = [
-        # friction 0.4 is the physical limit for the steepest training slope (0.40), so do not go lower
         dict(name="slippery (friction 0.4)", physics=dict(friction=0.4)),
-        dict(name="heavy payload (+6 kg)", physics=dict(payload=6.0)),
+        dict(name="heavy backpack (+6 kg)", physics=dict(payload=6.0)),
         dict(name="weak motors (80 %)", physics=dict(motor_strength=0.8)),
         dict(name="hard shoves (0.8 m/s every 3 s)", push=dict(max_push_vel=0.8, push_interval_s=3.0)),
-        dict(name="diagonal approach (45 deg)", heading_offset=0.785),
         dict(name="all at once (0.45, +5 kg, 85 %, shoves)",
              physics=dict(friction=0.45, payload=5.0, motor_strength=0.85),
              push=dict(max_push_vel=0.6, push_interval_s=4.0)),
     ]
+    # the sorting room, with boxes / physics / disturbances the policy never experienced
+    sort_unseen_conditions = [
+        dict(name="heavier boxes (6.5 - 8 kg)", box_mass=(6.5, 8.0)),
+        dict(name="feather-light boxes (0.3 - 1 kg)", box_mass=(0.3, 1.0)),
+        dict(name="slippery floor (friction 0.4)", physics=dict(friction=0.4)),
+        dict(name="weak motors (80 %)", physics=dict(motor_strength=0.8)),
+        dict(name="heavy backpack (+6 kg)", physics=dict(payload=6.0)),
+        dict(name="shoves (0.6 m/s every 4 s)", push=dict(max_push_vel=0.6, push_interval_s=4.0)),
+    ]
 
 
 class ObsCfg:
-    # Height scan: terrain height sampled on a grid around the robot (in its heading frame)
-    scan_x = [-0.36, -0.24, -0.12, 0.0, 0.12, 0.24, 0.36, 0.48, 0.60, 0.72, 0.84]
-    scan_y = [-0.24, -0.12, 0.0, 0.12, 0.24]
     lin_vel_scale = 2.0
     ang_vel_scale = 0.25
     joint_vel_scale = 0.05
@@ -176,19 +216,16 @@ class ObsCfg:
 
 
 class RewardCfg:
-    """Reward = sum(weight * term) * control_dt. See BipedEnv._compute_reward."""
+    """Reward = sum(weight * term) * control_dt. See RobotEnv._common_terms and the task classes."""
     tracking_sigma = 0.25
     swing_height_target = 0.09      # desired foot clearance above the terrain during swing [m]
     min_feet_distance = 0.14        # feet closer than this (sideways) are penalised [m]
     soft_joint_limit = 0.9          # fraction of the joint range that is penalty free
 
-    weights = {
-        # task
-        "tracking_lin_vel": 1.5,    # follow the commanded forward speed
-        "tracking_ang_vel": 0.75,   # follow the commanded yaw rate (heading)
+    # shared by both tasks: posture, feet, effort
+    common = {
         "alive": 0.15,              # not having fallen
         "gait_contact": 0.2,        # feet touch down / lift off in the commanded rhythm
-        # style / regularisation
         "swing_height": -20.0,      # lift the swing foot to the target clearance
         "lin_vel_z": -0.5,          # bouncing
         "ang_vel_xy": -0.05,        # wobbling
@@ -205,13 +242,77 @@ class RewardCfg:
         "joint_limits": -5.0,
         "termination": -100.0,      # one-off penalty for falling (scaled by dt like the rest)
     }
+    hike = {
+        "tracking_lin_vel": 1.5,    # follow the commanded velocity
+        "tracking_ang_vel": 0.75,   # follow the commanded yaw rate (heading)
+        "arm_pos": -0.05,           # arms far from the relaxed pose (they are free to swing for balance)
+    }
+
+
+# ======================================================================== SORT
+class SortCfg:
+    """
+    Task 2: sorting. A box appears on the pickup table. The robot walks up to it,
+    squeezes it between its palms, lifts it, carries it to the table whose colour
+    matches the box, puts it down there and lets go. Then the next box appears.
+    Boxes differ in weight (and size) and the robot is not told the weight: it
+    has to squeeze harder and lean back further for the heavy ones.
+    """
+    episode_length_s = 30.0
+    colors = [("red", (0.86, 0.22, 0.20)), ("green", (0.22, 0.66, 0.30)), ("blue", (0.20, 0.42, 0.90))]
+    shuffle_colors = True           # which table has which colour changes every episode
+    table_height = 0.70             # [m]
+    table_half = 0.25               # half size of the square table tops [m]
+    table_distance = 1.25           # tables stand this far from the middle of the room [m]
+    # directions of the pickup table and the drop-off tables, seen from the middle [deg] (multiples of 90)
+    pickup_angle = 0.0
+    drop_angles = [90.0, 180.0, 270.0]
+    box_inset = 0.13                # boxes are picked up / put down this far from the table edge [m]
+
+    # boxes: depth, width (between the palms), height [m]; the robot weighs 28.5 kg
+    box_sizes = [[0.20, 0.26, 0.20], [0.18, 0.24, 0.18], [0.22, 0.28, 0.22], [0.20, 0.24, 0.16], [0.18, 0.28, 0.22]]
+    box_mass = [1.5, 6.0]           # [kg]
+    num_box_masses = 6              # different masses within that range
+    num_robot_variants = 8          # robot / floor physics variants (domain randomisation)
+    box_friction = 1.0
+    # contact model: friction grasps need the exact (elliptic) friction cone and a stiff friction constraint,
+    # or the box slowly creeps out of the hands
+    elliptic_cone = True
+    impratio = 4.0
+
+    stand_off = 0.34                # torso <-> box distance for picking up / putting down [m]
+    lift_height = 0.08              # a box counts as picked up when it is this far above the table [m]
+    place_margin = 0.07             # a placed box must be at least this far inside the table edge [m]
+    place_hold_s = 0.3              # ... lie still for this long
+    release_distance = 0.05         # ... with both palms at least this far from it [m]
+    speed = 0.5                     # walking speed the reward asks for [m/s]
+    stand_radius = 0.2              # closer than this to where it should stand, the robot stops stepping [m]
+    start_near = 0.5                # share of episodes that start in front of the pickup table (the rest: anywhere)
+
+    # The task reward is a progress score:  5 * boxes sorted + stage + progress within the stage (0..1)
+    #   stage 0  fetch    walk to the box, palms to its two sides
+    #   stage 1  lift     squeeze and lift it off the table
+    #   stage 2  carry    carry it to the table of its colour
+    #   stage 3  lower    lower it onto that table
+    #   stage 4  release  let go
+    # Finishing a stage is always worth more than lingering in it.
+    rewards = {
+        "stage": 1.0,
+        "approach": 0.5,            # speed towards where it should stand (helps to discover walking)
+        "face": 0.3,                # facing the table it is dealing with
+        "box_vel": -0.5,            # held box moving relative to the torso
+        "stand_still": -1.0,        # drifting when it should stand
+        "arm_pos": 0.0,
+        "sorted": 250.0,            # one-off bonus per box sorted (scaled by dt like the rest)
+        "failed": -150.0,           # one-off: box dropped on the floor or put on the wrong table
+    }
 
 
 class PPOCfg:
     # rollout
     num_envs = 2048                 # parallel robots
     num_steps = 24                  # policy steps per robot per iteration
-    max_iterations = 1500           # stairs are solved after ~800; the rest polishes the gait
+    max_iterations = 3000
 
     # networks
     actor_hidden = [512, 256, 128]

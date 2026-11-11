@@ -1,0 +1,238 @@
+<!--
+  humanoid.xml - 20-DoF humanoid (12 leg + 8 arm joints) for sim-robot-trainer.
+
+  Conventions: +x forward, +y left, +z up. Angles in radians.
+  Each leg: hip yaw (z) -> hip roll (x) -> hip pitch (y) -> knee (y) -> ankle pitch (y) -> ankle roll (x).
+  Negative hip pitch swings the leg forward, positive knee angle bends the knee,
+  negative ankle pitch lifts the toes.
+  Each arm: shoulder pitch (y) -> shoulder roll (x) -> shoulder yaw (z) -> elbow (y), ending in a
+  flat rubber palm that faces the other hand when the forearms point forward - boxes are picked
+  up by squeezing them between the two palms. Negative shoulder pitch / elbow angles swing the
+  arm / forearm forward, positive (left) / negative (right) shoulder roll lifts the arm sideways.
+
+  Total mass ~28.5 kg, hip height ~0.75 m with straight legs.
+  Actuators are PD position servos (kp/kv) with torque limits: the policy outputs
+  joint position targets, the PD loop runs inside the simulator at every physics step.
+
+  Robot geoms use contype=1/conaffinity=0 and the terrain uses contype=0/conaffinity=1,
+  so the robot collides with the terrain but not with itself (cheaper and more robust). The few
+  self-collisions that matter (hands / forearms against the body and each other) are listed
+  explicitly in <contact>. Free objects (boxes) use contype=1/conaffinity=1.
+-->
+<mujoco model="humanoid">
+  <compiler angle="radian" autolimits="true"/>
+
+  <option timestep="0.005" integrator="implicitfast" cone="pyramidal" impratio="1"
+          iterations="20" ls_iterations="10">
+    <flag eulerdamp="disable"/>
+  </option>
+
+  <!-- Rendering scale is set by hand: the terrain added at build time is ~100 m wide and would
+       otherwise push the near clipping plane and the shadow map out to that scale. -->
+  <statistic extent="5" center="0 0 0.7"/>
+
+  <visual>
+    <global offwidth="1280" offheight="720"/>
+    <quality shadowsize="4096"/>
+    <headlight ambient="0.45 0.45 0.45" diffuse="0.55 0.55 0.55" specular="0.1 0.1 0.1"/>
+    <map znear="0.01" zfar="60"/>
+  </visual>
+
+  <asset>
+    <texture name="sky" type="skybox" builtin="gradient" rgb1="0.55 0.7 0.9" rgb2="0.95 0.97 1" width="64" height="64"/>
+    <texture name="grid" type="2d" builtin="checker" rgb1="0.36 0.4 0.44" rgb2="0.42 0.46 0.5" width="128" height="128" mark="edge" markrgb="0.3 0.33 0.36"/>
+    <material name="grid" texture="grid" texrepeat="1 1" texuniform="true" reflectance="0.05"/>
+    <material name="body" rgba="0.85 0.86 0.88 1"/>
+    <material name="left" rgba="0.2 0.5 0.9 1"/>
+    <material name="right" rgba="0.9 0.4 0.2 1"/>
+    <material name="foot" rgba="0.15 0.15 0.17 1"/>
+    <material name="arm" rgba="0.62 0.64 0.68 1"/>
+  </asset>
+
+  <default>
+    <geom contype="1" conaffinity="0" condim="3" friction="1.0 0.005 0.0001" solref="0.02 1" solimp="0.9 0.95 0.001"/>
+    <joint type="hinge" armature="0.02" damping="0.1" frictionloss="0.05"/>
+    <site group="3" rgba="1 0 0 0.3"/>
+    <default class="hip_yaw">
+      <joint axis="0 0 1" armature="0.02"/>
+      <position kp="60" kv="2" forcerange="-40 40"/>
+    </default>
+    <default class="hip_roll">
+      <joint axis="1 0 0" armature="0.03"/>
+      <position kp="100" kv="3" forcerange="-60 60"/>
+    </default>
+    <default class="hip_pitch">
+      <joint axis="0 1 0" armature="0.03"/>
+      <position kp="100" kv="3" forcerange="-90 90"/>
+    </default>
+    <default class="knee">
+      <joint axis="0 1 0" armature="0.03"/>
+      <position kp="120" kv="4" forcerange="-110 110"/>
+    </default>
+    <default class="ankle_pitch">
+      <joint axis="0 1 0" armature="0.015"/>
+      <position kp="40" kv="1.5" forcerange="-40 40"/>
+    </default>
+    <default class="ankle_roll">
+      <joint axis="1 0 0" armature="0.015"/>
+      <position kp="20" kv="1" forcerange="-20 20"/>
+    </default>
+    <default class="shoulder_pitch">
+      <joint axis="0 1 0" armature="0.01"/>
+      <position kp="50" kv="2" forcerange="-30 30"/>
+    </default>
+    <default class="shoulder_roll">
+      <joint axis="1 0 0" armature="0.01"/>
+      <position kp="50" kv="2" forcerange="-30 30"/>
+    </default>
+    <default class="shoulder_yaw">
+      <joint axis="0 0 1" armature="0.008"/>
+      <position kp="40" kv="1.5" forcerange="-20 20"/>
+    </default>
+    <default class="elbow">
+      <joint axis="0 1 0" armature="0.008"/>
+      <position kp="40" kv="1.5" forcerange="-25 25"/>
+    </default>
+    <default class="palm">
+      <!-- rubber pad: high friction, with torsional friction so a squeezed box does not pivot -->
+      <geom type="box" size="0.05 0.012 0.065" pos="0 0 -0.27" mass="0.3" material="foot"
+            friction="1.6 0.02 0.0001" condim="4"/>
+    </default>
+  </default>
+
+  <worldbody>
+    <light name="sun" mode="trackcom" pos="0 0 6" dir="0.2 0.3 -1" diffuse="0.7 0.7 0.7" castshadow="true"/>
+
+    <body name="torso" pos="0 0 0.80">
+      <freejoint name="root"/>
+      <camera name="track" mode="trackcom" pos="2.6 -2.8 0.9" xyaxes="0.73 0.68 0 -0.17 0.18 0.97" fovy="45"/>
+      <camera name="side" mode="trackcom" pos="0 -3.4 0.5" xyaxes="1 0 0 0 0.12 0.99" fovy="45"/>
+      <geom name="pelvis" type="box" size="0.07 0.115 0.06" mass="4" material="body"/>
+      <geom name="trunk" type="box" size="0.075 0.12 0.15" pos="0 0 0.21" mass="7.3" material="body"/>
+      <geom name="head" type="sphere" size="0.07" pos="0.01 0 0.44" mass="0.001" material="body" contype="0"/>
+      <geom name="visor" type="box" size="0.01 0.05 0.02" pos="0.07 0 0.45" mass="0.001" rgba="0.1 0.1 0.12 1" contype="0"/>
+      <site name="imu" pos="0 0 0"/>
+
+      <!-- left leg -->
+      <body name="l_thigh" pos="0 0.09 -0.06">
+        <joint name="l_hip_yaw" class="hip_yaw" range="-0.6 0.6"/>
+        <joint name="l_hip_roll" class="hip_roll" range="-0.3 0.5"/>
+        <joint name="l_hip_pitch" class="hip_pitch" range="-1.9 0.8"/>
+        <geom name="l_thigh" type="capsule" fromto="0 0 -0.03 0 0 -0.32" size="0.048" mass="3.5" material="left"/>
+        <body name="l_shin" pos="0 0 -0.35">
+          <joint name="l_knee" class="knee" range="0 2.3"/>
+          <geom name="l_shin" type="capsule" fromto="0 0 -0.03 0 0 -0.31" size="0.036" mass="2.0" material="left"/>
+          <body name="l_foot" pos="0 0 -0.35">
+            <joint name="l_ankle_pitch" class="ankle_pitch" range="-0.9 0.7"/>
+            <joint name="l_ankle_roll" class="ankle_roll" range="-0.35 0.35"/>
+            <geom name="l_foot" type="box" size="0.1 0.045 0.015" pos="0.03 0 -0.035" mass="0.8" material="foot"/>
+            <site name="l_foot" type="box" size="0.105 0.05 0.02" pos="0.03 0 -0.04"/>
+            <site name="l_sole" pos="0.03 0 -0.05" size="0.01"/>
+          </body>
+        </body>
+      </body>
+
+      <!-- right leg (mirror of the left: roll/yaw ranges are flipped) -->
+      <body name="r_thigh" pos="0 -0.09 -0.06">
+        <joint name="r_hip_yaw" class="hip_yaw" range="-0.6 0.6"/>
+        <joint name="r_hip_roll" class="hip_roll" range="-0.5 0.3"/>
+        <joint name="r_hip_pitch" class="hip_pitch" range="-1.9 0.8"/>
+        <geom name="r_thigh" type="capsule" fromto="0 0 -0.03 0 0 -0.32" size="0.048" mass="3.5" material="right"/>
+        <body name="r_shin" pos="0 0 -0.35">
+          <joint name="r_knee" class="knee" range="0 2.3"/>
+          <geom name="r_shin" type="capsule" fromto="0 0 -0.03 0 0 -0.31" size="0.036" mass="2.0" material="right"/>
+          <body name="r_foot" pos="0 0 -0.35">
+            <joint name="r_ankle_pitch" class="ankle_pitch" range="-0.9 0.7"/>
+            <joint name="r_ankle_roll" class="ankle_roll" range="-0.35 0.35"/>
+            <geom name="r_foot" type="box" size="0.1 0.045 0.015" pos="0.03 0 -0.035" mass="0.8" material="foot"/>
+            <site name="r_foot" type="box" size="0.105 0.05 0.02" pos="0.03 0 -0.04"/>
+            <site name="r_sole" pos="0.03 0 -0.05" size="0.01"/>
+          </body>
+        </body>
+      </body>
+
+      <!-- left arm -->
+      <body name="l_upper_arm" pos="0 0.162 0.31">
+        <joint name="l_shoulder_pitch" class="shoulder_pitch" range="-2.8 1.2"/>
+        <joint name="l_shoulder_roll" class="shoulder_roll" range="-0.35 1.7"/>
+        <joint name="l_shoulder_yaw" class="shoulder_yaw" range="-1.3 1.3"/>
+        <geom name="l_shoulder" type="sphere" size="0.045" mass="0.3" material="left"/>
+        <geom name="l_upper_arm" type="capsule" fromto="0 0 -0.03 0 0 -0.22" size="0.034" mass="1.0" material="arm"/>
+        <body name="l_forearm" pos="0 0 -0.25">
+          <joint name="l_elbow" class="elbow" range="-2.3 0"/>
+          <geom name="l_forearm" type="capsule" fromto="0 0 -0.02 0 0 -0.2" size="0.029" mass="0.7" material="arm"/>
+          <geom name="l_palm" class="palm"/>
+          <site name="l_palm" type="box" size="0.052 0.016 0.067" pos="0 0 -0.27"/>
+          <site name="l_grip" pos="0 -0.012 -0.27" size="0.01"/>
+        </body>
+      </body>
+
+      <!-- right arm -->
+      <body name="r_upper_arm" pos="0 -0.162 0.31">
+        <joint name="r_shoulder_pitch" class="shoulder_pitch" range="-2.8 1.2"/>
+        <joint name="r_shoulder_roll" class="shoulder_roll" range="-1.7 0.35"/>
+        <joint name="r_shoulder_yaw" class="shoulder_yaw" range="-1.3 1.3"/>
+        <geom name="r_shoulder" type="sphere" size="0.045" mass="0.3" material="right"/>
+        <geom name="r_upper_arm" type="capsule" fromto="0 0 -0.03 0 0 -0.22" size="0.034" mass="1.0" material="arm"/>
+        <body name="r_forearm" pos="0 0 -0.25">
+          <joint name="r_elbow" class="elbow" range="-2.3 0"/>
+          <geom name="r_forearm" type="capsule" fromto="0 0 -0.02 0 0 -0.2" size="0.029" mass="0.7" material="arm"/>
+          <geom name="r_palm" class="palm"/>
+          <site name="r_palm" type="box" size="0.052 0.016 0.067" pos="0 0 -0.27"/>
+          <site name="r_grip" pos="0 0.012 -0.27" size="0.01"/>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <contact>
+    <pair geom1="l_palm" geom2="r_palm"/>
+    <pair geom1="l_palm" geom2="trunk"/>
+    <pair geom1="r_palm" geom2="trunk"/>
+    <pair geom1="l_forearm" geom2="trunk"/>
+    <pair geom1="r_forearm" geom2="trunk"/>
+    <pair geom1="l_palm" geom2="pelvis"/>
+    <pair geom1="r_palm" geom2="pelvis"/>
+    <pair geom1="l_palm" geom2="l_thigh"/>
+    <pair geom1="r_palm" geom2="r_thigh"/>
+  </contact>
+
+  <actuator>
+    <position name="l_hip_yaw" joint="l_hip_yaw" class="hip_yaw"/>
+    <position name="l_hip_roll" joint="l_hip_roll" class="hip_roll"/>
+    <position name="l_hip_pitch" joint="l_hip_pitch" class="hip_pitch"/>
+    <position name="l_knee" joint="l_knee" class="knee"/>
+    <position name="l_ankle_pitch" joint="l_ankle_pitch" class="ankle_pitch"/>
+    <position name="l_ankle_roll" joint="l_ankle_roll" class="ankle_roll"/>
+    <position name="r_hip_yaw" joint="r_hip_yaw" class="hip_yaw"/>
+    <position name="r_hip_roll" joint="r_hip_roll" class="hip_roll"/>
+    <position name="r_hip_pitch" joint="r_hip_pitch" class="hip_pitch"/>
+    <position name="r_knee" joint="r_knee" class="knee"/>
+    <position name="r_ankle_pitch" joint="r_ankle_pitch" class="ankle_pitch"/>
+    <position name="r_ankle_roll" joint="r_ankle_roll" class="ankle_roll"/>
+    <position name="l_shoulder_pitch" joint="l_shoulder_pitch" class="shoulder_pitch"/>
+    <position name="l_shoulder_roll" joint="l_shoulder_roll" class="shoulder_roll"/>
+    <position name="l_shoulder_yaw" joint="l_shoulder_yaw" class="shoulder_yaw"/>
+    <position name="l_elbow" joint="l_elbow" class="elbow"/>
+    <position name="r_shoulder_pitch" joint="r_shoulder_pitch" class="shoulder_pitch"/>
+    <position name="r_shoulder_roll" joint="r_shoulder_roll" class="shoulder_roll"/>
+    <position name="r_shoulder_yaw" joint="r_shoulder_yaw" class="shoulder_yaw"/>
+    <position name="r_elbow" joint="r_elbow" class="elbow"/>
+  </actuator>
+
+  <sensor>
+    <!-- order matters: env_base.py indexes sensordata by these offsets -->
+    <touch name="l_touch" site="l_foot"/>
+    <touch name="r_touch" site="r_foot"/>
+    <framepos name="l_foot_pos" objtype="site" objname="l_sole"/>
+    <framepos name="r_foot_pos" objtype="site" objname="r_sole"/>
+    <framelinvel name="l_foot_vel" objtype="site" objname="l_sole"/>
+    <framelinvel name="r_foot_vel" objtype="site" objname="r_sole"/>
+    <framezaxis name="l_foot_up" objtype="site" objname="l_sole"/>
+    <framezaxis name="r_foot_up" objtype="site" objname="r_sole"/>
+    <touch name="l_palm_touch" site="l_palm"/>
+    <touch name="r_palm_touch" site="r_palm"/>
+    <framepos name="l_grip_pos" objtype="site" objname="l_grip"/>
+    <framepos name="r_grip_pos" objtype="site" objname="r_grip"/>
+  </sensor>
+</mujoco>

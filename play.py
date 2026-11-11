@@ -7,7 +7,9 @@ Everything you do with a trained policy:
 
   play()      watch the robot in the interactive MuJoCo viewer
   record()    render an episode to a video file (no window needed)
-  evaluate()  measure success rates on every terrain type and stairs level
+  evaluate()  measure success rates, including conditions the policy never trained in
+
+The task (hike or sort) is read from the checkpoint.
 """
 
 import os
@@ -19,94 +21,156 @@ import numpy as np
 import torch
 
 from agent import get_device, load_policy
-from config import EvalCfg, TerrainCfg
-from environment import BipedEnv
+from config import EvalCfg, HikeCfg, SortCfg
 
 
-def terrain_names():
-    """All terrain names that can be shown: the training terrains first, then the held-out ones."""
-    names = []
-    for row in TerrainCfg.rows + EvalCfg.unseen_terrains:
-        if row["name"] not in names:
-            names.append(row["name"])
-    return names
-
-
-def _single_env(policy_path, terrain, level, speed, device, seed):
-    """One nominal robot on one chosen terrain: no curriculum, no pushes, no sensor noise."""
-    rows = [r for r in TerrainCfg.rows + EvalCfg.unseen_terrains if r["name"] == terrain]
-    if not rows:
-        raise ValueError(f"unknown terrain '{terrain}', choose from {terrain_names()}")
+# ----------------------------------------------------------------- scenes
+def load(policy_path, device="cpu"):
+    """-> (policy, task name, device)"""
     device = get_device(device)
-    policy, _ = load_policy(policy_path, device)
+    policy, ckpt = load_policy(policy_path, device)
     policy.eval()
-    flat = dict(TerrainCfg.flat_rows[0], weight=0.0)
-    env = BipedEnv(num_envs=1, flat_only=terrain == "flat", num_threads=1, seed=seed,
-                   terrain_rows=[flat, dict(rows[0], weight=1.0)], terrain_seed=seed,
-                   curriculum=False, fixed_level=level, randomize=False,
-                   fixed_speed=speed, resample_commands=False)
-    if policy.num_obs != env.num_obs:
-        raise ValueError(f"{policy_path} was trained with a different observation size")
-    return env, policy, device
+    return policy, ckpt.get("task", "hike"), device
 
 
-def _tracking_camera(model, distance=3.4, azimuth=115.0, elevation=-24.0):
+def make_scene(task, terrain="trail", level=5, speed=0.6, seed=0, physics=None, push=None, box_mass=None):
+    """One nominal robot for watching: no curriculum, no sensor noise, no pushes unless asked for."""
+    if task == "sort":
+        from env_sort import SortEnv
+        return SortEnv(num_envs=1, num_threads=1, seed=seed, randomize=False, physics=physics, push=push,
+                       box_mass=box_mass)
+    from env_hike import HikeEnv, row_by_name
+    flat = dict(HikeCfg.flat_rows[0], weight=0.0)
+    rows = None if terrain == "flat" else [flat, dict(row_by_name(terrain), weight=1.0)]
+    return HikeEnv(num_envs=1, flat_only=terrain == "flat", num_threads=1, seed=seed, rows=rows, terrain_seed=seed,
+                   curriculum=False, fixed_level=level, randomize=False, physics=physics, push=push,
+                   fixed_speed=speed, resample_commands=terrain != "flat")
+
+
+def make_camera(env, model):
     cam = mujoco.MjvCamera()
-    cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
-    cam.trackbodyid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "torso")
-    cam.distance, cam.azimuth, cam.elevation = distance, azimuth, elevation
-    cam.lookat[:] = [0.0, 0.0, 0.6]
+    if env.task == "sort":                                  # fixed view of the whole room
+        cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+        cam.lookat[:] = [0.1, 0.0, 0.65]
+        cam.distance, cam.azimuth, cam.elevation = 4.6, 150.0, -28.0
+    else:                                                   # follow the hiker
+        cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+        cam.trackbodyid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "torso")
+        cam.distance, cam.azimuth, cam.elevation = 4.2, 125.0, -26.0
+        cam.lookat[:] = [0.0, 0.0, 0.6]
     return cam
 
 
-def play(policy_path, terrain="stairs_up", level=5, speed=0.6, device="cpu", seed=0, duration=None):
+class Scene:
+    """A policy acting in a one-robot environment, with the bookkeeping the viewer and the recorder share."""
+
+    def __init__(self, policy, env, device):
+        self.policy, self.env, self.device = policy, env, device
+        if policy.num_obs != env.num_obs:
+            raise ValueError(f"this policy was trained with a different observation size ({policy.num_obs}) "
+                             f"than the '{env.task}' task uses ({env.num_obs})")
+        self.obs = env.reset()
+        self.model = env.model_of(0)
+        self.data = mujoco.MjData(self.model)
+        self.sorted_boxes = []                              # sort: boxes already put down (pos, mat, size, rgb)
+        self.events = []
+        self._remember_box()
+        self.sync()
+
+    def _remember_box(self):
+        env = self.env
+        if env.task != "sort":
+            return
+        qpos = env.state[0, env._box_qpos]
+        mat = np.zeros(9)
+        mujoco.mju_quat2Mat(mat, qpos[3:7])
+        self._box = (qpos[0:3].copy(), mat, env.box_half[0].copy(), env.colors[env.box_color[0]].copy())
+        self._count = int(env.sorted_count[0])
+
+    def step(self):
+        env = self.env
+        actions = self.policy.act_inference(torch.from_numpy(self.obs).to(self.device))
+        self.obs, _, done, info = env.step(actions.cpu().numpy())
+        event = None
+        if env.task == "sort":
+            if int(env.sorted_count[0]) > self._count:
+                self.sorted_boxes.append(self._box)
+                event = f"box {len(self.sorted_boxes)} sorted"
+        if done[0]:
+            if info["fell"][0]:
+                event = "left the trail" if info.get("off_trail", [False])[0] else \
+                    "dropped the box" if info.get("dropped", [False])[0] else \
+                    "wrong table" if info.get("wrong_table", [False])[0] else "fell"
+            elif info.get("reached_goal", [False])[0]:
+                event = "reached the end of the trail"
+            else:
+                event = "time is up"
+            self.sorted_boxes = []
+        self._remember_box()
+        if event:
+            self.events.append(event)
+        return done[0], event
+
+    def sync(self):
+        """Copy the robot's state into self.data (and self.model, which changes with the trail / box)."""
+        self.model = self.env.model_of(0)
+        self.env.write_data(0, self.data)
+
+    def draw_extras(self, scn):
+        """Add the boxes that were already sorted to a scene (they are not simulated any more)."""
+        for pos, mat, size, rgb in self.sorted_boxes:
+            if scn.ngeom >= scn.maxgeom:
+                break
+            mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_BOX, size, pos, mat,
+                                np.array([*rgb, 1.0], dtype=np.float32))
+            scn.ngeom += 1
+
+
+# ------------------------------------------------------------------ viewer
+def play(policy_path, terrain="trail", level=5, speed=0.6, device="cpu", seed=0, duration=None):
     """
     Watch a trained policy in the MuJoCo viewer. Runs in real time until the
     window is closed (or for `duration` seconds if given).
 
-    Keys:  UP / DOWN  faster / slower      LEFT / RIGHT  turn      BACKSPACE  restart the episode
+    Keys:  BACKSPACE  restart the episode      (hike) UP / DOWN  faster / slower
     """
     import mujoco.viewer
 
-    env, policy, device = _single_env(policy_path, terrain, level, speed, device, seed)
-    data = mujoco.MjData(env.model)
-    obs = env.reset()
-    env.write_data(0, data)
+    policy, task, device = load(policy_path, device)
+    env = make_scene(task, terrain, level, speed, seed)
+    scene = Scene(policy, env, device)
     state = {"reset": False}
 
     def on_key(key):
-        if key == 265:      # up
-            env.fixed_speed = min(env.fixed_speed + 0.1, 1.2)
-        elif key == 264:    # down
-            env.fixed_speed = max(env.fixed_speed - 0.1, 0.1)
-        elif key == 263:    # left
-            env.heading_target[0] += np.radians(20)
-        elif key == 262:    # right
-            env.heading_target[0] -= np.radians(20)
-        elif key == 259:    # backspace
+        if key == 259:      # backspace
             state["reset"] = True
-        env.commands[0, 0] = env.fixed_speed
+        elif task == "hike" and key in (265, 264):          # up / down
+            env.fixed_speed = float(np.clip(env.fixed_speed + (0.1 if key == 265 else -0.1), 0.0, 1.0))
+            env.speed[0] = env.fixed_speed
 
-    print(f"Playing {policy_path} on '{terrain}' (level {level}, {speed:.1f} m/s). Close the window to stop.")
-    print("Keys: UP/DOWN speed, LEFT/RIGHT turn, BACKSPACE restart")
+    what = f"'{terrain}' (level {level}, {speed:.1f} m/s)" if task == "hike" else "the sorting room"
+    print(f"Playing {policy_path} in {what}. Close the window to stop.")
+    print("Keys: BACKSPACE restart" + (", UP/DOWN speed" if task == "hike" else ""))
     threads_before = set(threading.enumerate())
-    viewer = mujoco.viewer.launch_passive(env.model, data, key_callback=on_key)
+    viewer = mujoco.viewer.launch_passive(scene.model, scene.data, key_callback=on_key)
     viewer_threads = [t for t in threading.enumerate() if t not in threads_before]
     try:
-        cam = _tracking_camera(env.model)
+        cam = make_camera(env, scene.model)
         viewer.cam.type, viewer.cam.trackbodyid = cam.type, cam.trackbodyid
         viewer.cam.distance, viewer.cam.azimuth, viewer.cam.elevation = cam.distance, cam.azimuth, cam.elevation
+        viewer.cam.lookat[:] = cam.lookat
         started = time.time()
         while viewer.is_running() and (duration is None or time.time() - started < duration):
             tick = time.time()
             if state["reset"]:
-                obs, state["reset"] = env.reset(), False
-            actions = policy.act_inference(torch.from_numpy(obs).to(device))
-            obs, _, done, info = env.step(actions.cpu().numpy())
-            if done[0]:
-                why = "fell" if info["fell"][0] else ("reached the goal" if info["reached_goal"][0] else "time is up")
-                print(f"episode over: {why}")
-            env.write_data(0, data)
+                scene.obs, state["reset"], scene.sorted_boxes = env.reset(), False, []
+            _, event = scene.step()
+            if event:
+                print(event)
+            with viewer.lock():
+                scene.sync()
+                viewer.user_scn.ngeom = 0
+                scene.draw_extras(viewer.user_scn)
             viewer.sync()
             time.sleep(max(0.0, env.dt - (time.time() - tick)))
     finally:
@@ -117,69 +181,75 @@ def play(policy_path, terrain="stairs_up", level=5, speed=0.6, device="cpu", see
         env.close()
 
 
-def record(policy_path, output="walk.mp4", terrain="stairs_up", level=5, speed=0.6, seconds=12.0,
-           device="cpu", seed=0, width=960, height=540, stop_when_done=True):
+# ---------------------------------------------------------------- recorder
+def render_episode(scene, seconds, width=960, height=540, fps=25, stop_when_done=True, on_frame=None):
+    """Run a Scene and render it. Returns (frames, list of events)."""
+    env = scene.env
+    renderer = mujoco.Renderer(scene.model, height, width)
+    cam = make_camera(env, scene.model)
+    every = max(1, int(round(1.0 / fps / env.dt)))
+    frames = []
+    for step in range(int(seconds / env.dt)):
+        done, event = scene.step()
+        if done and stop_when_done:
+            break
+        if step % every == 0:
+            scene.sync()
+            renderer.update_scene(scene.data, camera=cam)
+            scene.draw_extras(renderer.scene)
+            frame = renderer.render().copy()
+            frames.append(on_frame(frame, scene, event) if on_frame else frame)
+    renderer.close()
+    return frames, scene.events
+
+
+def record(policy_path, output="robot.mp4", terrain="trail", level=5, speed=0.6, seconds=None,
+           device="cpu", seed=0, width=960, height=540):
     """Render one episode to a video (mp4 or gif). Needs: pip install imageio imageio-ffmpeg"""
     try:
         import imageio
     except ImportError as exc:
         raise SystemExit("Recording needs imageio:  pip install imageio imageio-ffmpeg") from exc
 
-    env, policy, device = _single_env(policy_path, terrain, level, speed, device, seed)
-    data = mujoco.MjData(env.model)
-    renderer = mujoco.Renderer(env.model, height, width)
-    cam = _tracking_camera(env.model)
-    obs = env.reset()
-    frames, outcome = [], "time is up"
-    every = max(1, int(round(1.0 / 25.0 / env.dt)))        # 25 fps video
-    for step in range(int(seconds / env.dt)):
-        actions = policy.act_inference(torch.from_numpy(obs).to(device))
-        obs, _, done, info = env.step(actions.cpu().numpy())
-        if done[0]:
-            outcome = "fell" if info["fell"][0] else ("reached the goal" if info["reached_goal"][0] else outcome)
-            if stop_when_done:
-                break
-        if step % every == 0:
-            env.write_data(0, data)
-            renderer.update_scene(data, camera=cam)
-            frames.append(renderer.render().copy())
-    renderer.close()
+    policy, task, device = load(policy_path, device)
+    env = make_scene(task, terrain, level, speed, seed)
+    scene = Scene(policy, env, device)
+    frames, events = render_episode(scene, seconds or env.episode_length_s, width, height)
     env.close()
     os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
-    fps = 1.0 / (env.dt * every)
     if output.lower().endswith(".gif"):
-        imageio.mimsave(output, frames, duration=1.0 / fps, loop=0)
+        imageio.mimsave(output, frames, duration=1.0 / 25, loop=0)
     else:
-        imageio.mimsave(output, frames, fps=fps)
-    print(f"Saved {len(frames)} frames to {output} ({outcome})")
-    return outcome
+        imageio.mimsave(output, frames, fps=25)
+    print(f"Saved {len(frames)} frames to {output} ({', '.join(events) or 'time is up'})")
+    return events
 
 
-def _run_episodes(policy, env, device):
-    """One episode per robot with the deterministic policy -> (success, fell, speed error) per robot."""
+# -------------------------------------------------------------- evaluation
+def _act(policy, obs, device):
+    return policy.act_inference(torch.from_numpy(obs).to(device)).cpu().numpy()
+
+
+def _hike_episodes(policy, env, device):
+    """One episode per robot with the deterministic policy -> (success, fell) per robot."""
     for row in np.unique(env.env_row[~env.is_flat]):            # spread each row evenly over the levels
         ids = np.nonzero(env.env_row == row)[0]
         env.env_level[ids] = np.arange(ids.size) % env.terrain.num_levels
     env.env_level[env.is_flat] = 0
+    levels = env.env_level.copy()
     obs = env.reset()
     n = env.num_envs
     running = np.ones(n, dtype=bool)                            # still in its first episode
     success, fell = np.zeros(n, dtype=bool), np.zeros(n, dtype=bool)
-    speed_err, steps = np.zeros(n), np.zeros(n)
     for _ in range(env.max_episode_length + 1):
-        cmd_speed = env.commands[:, 0].copy()
-        actions = policy.act_inference(torch.from_numpy(obs).to(device))
-        obs, _, done, info = env.step(actions.cpu().numpy())
+        obs, _, done, info = env.step(_act(policy, obs, device))
         ended = running & done
         fell |= ended & info["fell"]
         success |= ended & ~info["fell"] & (info["reached_goal"] | env.is_flat)
-        active = running & ~done
-        speed_err[active] += np.abs(env.base_lin_vel[active, 0] - cmd_speed[active])
-        steps[active] += 1
         running &= ~done
         if not running.any():
             break
-    return success, fell, speed_err / np.maximum(steps, 1)
+    return levels, success, fell
 
 
 def _per_terrain(env, levels, success, fell):
@@ -202,70 +272,138 @@ def _per_terrain(env, levels, success, fell):
 def _print_terrain_table(title, table, num_levels):
     print(f"\n{title}")
     header = " ".join(f"L{lv:<3}" for lv in range(num_levels))
-    print(f"  {'terrain':<24} {'success':>7} {'fell':>5}   success per level: {header}")
+    print(f"  {'trail':<14} {'success':>7} {'failed':>6}   success per level: {header}")
     for name, r in table.items():
         cells = " ".join(f"{v * 100:3.0f} " for v in r["levels"]) if len(r["levels"]) > 1 else "(no levels)"
-        print(f"  {name:<24} {r['success']:>7.0%} {r['fell']:>5.0%}                      {cells}")
+        print(f"  {name:<14} {r['success']:>7.0%} {r['fell']:>6.0%}                      {cells}")
 
 
-def evaluate(policy_path, num_envs=2000, device="auto", num_threads=None, seed=123, suite="all", verbose=True):
-    """
-    Test a policy with exploration noise switched off, one episode per robot.
+def evaluate_hike(policy, device, num_envs=2000, num_threads=None, seed=123, suite="all", verbose=True):
+    from env_hike import HikeEnv
 
-    suite "trained":  the training terrains with the nominal robot
-    suite "unseen":   held-out conditions the policy never trained on (EvalCfg):
-                      new terrain types, and the training terrains with physics
-                      or commands outside the training ranges
-    suite "all":      both
-
-    Success = crossing the whole obstacle tile (or, on flat ground, not falling
-    for a whole episode). Returns a dict with all numbers.
-    """
-    device = get_device(device)
-    policy, _ = load_policy(policy_path, device)
-    policy.eval()
     common = dict(num_envs=num_envs, num_threads=num_threads, seed=seed, curriculum=False)
     results = {}
-    if verbose:
-        print(f"Evaluating {policy_path}  ({num_envs} robots per test, one episode each, no exploration noise)")
-
     if suite in ("trained", "all"):
-        env = BipedEnv(randomize=False, **common)
-        success, fell, _ = _run_episodes(policy, env, device)
-        results["trained"] = _per_terrain(env, env.env_level.copy(), success, fell)
+        env = HikeEnv(randomize=False, **common)
+        results["trained"] = _per_terrain(env, *_hike_episodes(policy, env, device))
         if verbose:
-            _print_terrain_table("TRAINING TERRAINS (nominal robot)", results["trained"], env.terrain.num_levels)
+            _print_terrain_table("TRAINING TRAILS (nominal robot)", results["trained"], env.terrain.num_levels)
         env.close()
 
     if suite in ("unseen", "all"):
-        env = BipedEnv(randomize=False, terrain_rows=EvalCfg.unseen_terrains, terrain_seed=seed, **common)
-        success, fell, _ = _run_episodes(policy, env, device)
-        results["unseen_terrains"] = _per_terrain(env, env.env_level.copy(), success, fell)
+        env = HikeEnv(randomize=False, rows=EvalCfg.unseen_rows, terrain_seed=EvalCfg.unseen_seed, **common)
+        results["unseen_trails"] = _per_terrain(env, *_hike_episodes(policy, env, device))
         if verbose:
-            _print_terrain_table("UNSEEN TERRAINS (never used in training)", results["unseen_terrains"],
-                                 env.terrain.num_levels)
+            _print_terrain_table("UNSEEN TRAILS (sections and layouts never used in training)",
+                                 results["unseen_trails"], env.terrain.num_levels)
         env.close()
 
         results["unseen_conditions"] = {}
-        names = list(dict.fromkeys(row["name"] for row in TerrainCfg.rows))
+        names = list(dict.fromkeys(row["name"] for row in HikeCfg.rows))
         if verbose:
-            print("\nUNSEEN CONDITIONS (training terrains, physics / commands outside the training ranges)")
-            print(f"  success, all levels          {'condition':<14}" + "".join(f"{n:>12}" for n in names)
-                  + f"{'overall':>9} {'fell':>5}")
+            print("\nUNSEEN CONDITIONS (training trails, physics outside the training ranges)")
+            print(f"  success, all levels          {'condition':<14}" + "".join(f"{n:>8}" for n in names)
+                  + f"{'overall':>9} {'failed':>6}")
         for cond in EvalCfg.unseen_conditions:
-            env = BipedEnv(randomize=False, physics=cond.get("physics"), push=cond.get("push"),
-                           heading_offset=cond.get("heading_offset"), **common)
-            success, fell, _ = _run_episodes(policy, env, device)
+            env = HikeEnv(randomize=False, physics=cond.get("physics"), push=cond.get("push"), **common)
+            levels, success, fell = _hike_episodes(policy, env, device)
             r = {"overall": float(success.mean()), "fell": float(fell.mean()),
-                 "per_terrain": _per_terrain(env, env.env_level.copy(), success, fell)}
+                 "per_terrain": _per_terrain(env, levels, success, fell)}
             results["unseen_conditions"][cond["name"]] = r
             if verbose:
-                cells = "".join(f"{r['per_terrain'][n]['success']:>12.0%}" for n in names)
-                print(f"  {cond['name']:<43}{cells}{r['overall']:>9.0%} {r['fell']:>5.0%}")
+                cells = "".join(f"{r['per_terrain'][n]['success']:>8.0%}" for n in names)
+                print(f"  {cond['name']:<43}{cells}{r['overall']:>9.0%} {r['fell']:>6.0%}")
             env.close()
-
-    if verbose and "unseen_terrains" in results:
-        avg = np.mean([r["success"] for r in results["unseen_terrains"].values()])
-        cond = np.mean([r["overall"] for r in results["unseen_conditions"].values()])
-        print(f"\nSummary: {avg:.0%} average success on unseen terrains, {cond:.0%} under unseen conditions")
+        if verbose:
+            avg = np.mean([r["success"] for name, r in results["unseen_trails"].items() if name != "flat"])
+            cond = np.mean([r["overall"] for r in results["unseen_conditions"].values()])
+            print(f"\nSummary: {avg:.0%} average success on unseen trails, {cond:.0%} under unseen conditions")
     return results
+
+
+def _sort_episodes(policy, env, device):
+    """One 30 s episode per robot -> dict of per-robot arrays."""
+    obs = env.reset()
+    n = env.num_envs
+    running = np.ones(n, dtype=bool)
+    out = {"sorted": np.zeros(n), "fell": np.zeros(n, dtype=bool), "dropped": np.zeros(n, dtype=bool),
+           "wrong": np.zeros(n, dtype=bool), "first_mass": env.box_masses[env.box_mass_index].copy(),
+           "first_sorted": np.zeros(n, dtype=bool), "first_time": np.full(n, np.nan)}
+    for step in range(env.max_episode_length + 1):
+        before = env.sorted_count.copy()
+        obs, _, done, info = env.step(_act(policy, obs, device))
+        gained = running & ((env.sorted_count > before) | (done & env.just_sorted))
+        first = gained & ~out["first_sorted"]
+        out["first_time"][first] = (step + 1) * env.dt
+        out["first_sorted"] |= gained
+        out["sorted"] += gained
+        ended = running & done
+        out["dropped"] |= ended & info["dropped"]
+        out["wrong"] |= ended & info["wrong_table"]
+        out["fell"] |= ended & info["fell"] & ~info["dropped"] & ~info["wrong_table"]
+        running &= ~done
+        if not running.any():
+            break
+    return out
+
+
+def _sort_summary(r):
+    return {"boxes": float(r["sorted"].mean()), "any": float((r["sorted"] > 0).mean()),
+            "fell": float(r["fell"].mean()), "dropped": float(r["dropped"].mean()), "wrong": float(r["wrong"].mean())}
+
+
+def evaluate_sort(policy, device, num_envs=1000, num_threads=None, seed=123, suite="all", verbose=True):
+    from env_sort import SortEnv
+
+    common = dict(num_envs=num_envs, num_threads=num_threads, seed=seed)
+    results = {}
+    row = lambda name, s: (f"  {name:<44}{s['boxes']:>7.2f}{s['any']:>12.0%}{s['fell']:>8.0%}"
+                           f"{s['dropped']:>9.0%}{s['wrong']:>8.0%}")
+    header = (f"  {'':<44}{'boxes':>7}{'>= 1 box':>12}{'fell':>8}{'dropped':>9}{'wrong':>8}\n"
+              f"  {'':<44}{'/ 30 s':>7}{'sorted':>12}{'':>8}{'box':>9}{'table':>8}")
+    if suite in ("trained", "all"):
+        env = SortEnv(randomize=False, **common)
+        r = _sort_episodes(policy, env, device)
+        results["trained"] = _sort_summary(r)
+        results["by_mass"] = {float(m): float(r["first_sorted"][r["first_mass"] == m].mean()) for m in env.box_masses}
+        if verbose:
+            print(f"\nTRAINING CONDITIONS (nominal robot, boxes {env.box_masses[0]:.1f} - {env.box_masses[-1]:.1f} kg)")
+            print(header)
+            print(row("sorting room", results["trained"]))
+            print("  first box sorted, by weight:  " + "   ".join(f"{m:.1f} kg {v:.0%}" for m, v in results["by_mass"].items()))
+            print(f"  time to sort the first box: {np.nanmean(r['first_time']):.1f} s on average")
+        env.close()
+    if suite in ("unseen", "all"):
+        results["unseen_conditions"] = {}
+        if verbose:
+            print("\nUNSEEN CONDITIONS (outside the training ranges)")
+            print(header)
+        for cond in EvalCfg.sort_unseen_conditions:
+            env = SortEnv(randomize=False, physics=cond.get("physics"), push=cond.get("push"),
+                          box_mass=cond.get("box_mass"), **common)
+            s = _sort_summary(_sort_episodes(policy, env, device))
+            results["unseen_conditions"][cond["name"]] = s
+            if verbose:
+                print(row(cond["name"], s))
+            env.close()
+    return results
+
+
+def evaluate(policy_path, num_envs=None, device="auto", num_threads=None, seed=123, suite="all", verbose=True):
+    """
+    Test a policy with exploration noise switched off, one episode per robot.
+
+    suite "trained":  the training conditions with the nominal robot
+    suite "unseen":   held-out conditions the policy never trained on (EvalCfg)
+    suite "all":      both
+
+    hike: success = reaching the end of the trail (on flat ground: not falling).
+    sort: boxes sorted per 30 s episode and how episodes ended.
+    Returns a dict with all numbers.
+    """
+    policy, task, device = load(policy_path, device)
+    if verbose:
+        print(f"Evaluating {policy_path}  (task: {task}, one episode per robot, no exploration noise)")
+    if task == "sort":
+        return evaluate_sort(policy, device, num_envs or 1000, num_threads, seed, suite, verbose)
+    return evaluate_hike(policy, device, num_envs or 2000, num_threads, seed, suite, verbose)

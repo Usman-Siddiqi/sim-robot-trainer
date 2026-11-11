@@ -24,7 +24,46 @@ import torch
 
 from agent import PPO, ActorCritic, get_device, load_policy, print_device_info, save_checkpoint
 from config import LOG_PATH, MODEL_SAVE_PATH, PPOCfg
-from environment import BipedEnv
+
+
+def make_env(task, **kwargs):
+    """Create the environment of a task ("hike" or "sort")."""
+    if task == "hike":
+        from env_hike import HikeEnv
+        return HikeEnv(**kwargs)
+    if task == "sort":
+        from env_sort import SortEnv
+        kwargs.pop("flat_only", None)
+        return SortEnv(**kwargs)
+    raise ValueError(f"unknown task '{task}' (hike or sort)")
+
+
+def find_latest_model(models_dir=MODEL_SAVE_PATH, task=None):
+    """Most recently written checkpoint under models_dir (searched recursively), or None."""
+    found = []
+    for root, _, files in os.walk(models_dir):
+        found += [os.path.join(root, f) for f in files if f.endswith(".pt")]
+    for path in sorted(found, key=os.path.getmtime, reverse=True):
+        if task is None:
+            return path
+        try:
+            if torch.load(path, map_location="cpu", weights_only=True).get("task", "hike") == task:
+                return path
+        except Exception:
+            continue
+    return None
+
+
+def make_env(task, **kwargs):
+    """Create the environment of a task ("hike" or "sort")."""
+    if task == "hike":
+        from env_hike import HikeEnv
+        return HikeEnv(**kwargs)
+    if task == "sort":
+        from env_sort import SortEnv
+        kwargs.pop("flat_only", None)
+        return SortEnv(**kwargs)
+    raise ValueError(f"unknown task '{task}' (hike or sort)")
 
 
 def find_latest_model(models_dir=MODEL_SAVE_PATH):
@@ -39,16 +78,17 @@ def find_latest_model(models_dir=MODEL_SAVE_PATH):
     return newest
 
 
-def train(num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_iterations, flat_only=False,
+def train(task="hike", num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_iterations, flat_only=False,
           device="auto", num_threads=None, resume=None, run_name=None, seed=0,
           save_path=MODEL_SAVE_PATH, log_path=LOG_PATH):
     """
-    Train the biped.
+    Train the robot.
 
     Args:
+        task: "hike" (walk mountain trails) or "sort" (carry coloured boxes to the matching table)
         num_envs: robots simulated in parallel
         max_iterations: PPO iterations to run in this session
-        flat_only: flat ground only (no stairs)
+        flat_only: hike only: flat ground, no trails (quick sanity check)
         device: "auto", "cuda" or "cpu" for the neural networks
         num_threads: physics threads (default: all logical cores)
         resume: checkpoint to continue from
@@ -65,8 +105,8 @@ def train(num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_iterations, flat_o
         # physics and learning take turns, so both may use every core
         torch.set_num_threads(num_threads or os.cpu_count() or 1)
 
-    task = "flat" if flat_only else "stairs"
-    run_name = run_name or f"{task}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    label = "flat" if (flat_only and task == "hike") else task
+    run_name = run_name or f"{label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     run_dir = os.path.join(save_path, run_name)
     os.makedirs(run_dir, exist_ok=True)
 
@@ -74,7 +114,7 @@ def train(num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_iterations, flat_o
     print(f"Training run '{run_name}'  (task: {task})")
     print_device_info(device)
 
-    env = BipedEnv(num_envs=num_envs, flat_only=flat_only, num_threads=num_threads, seed=seed)
+    env = make_env(task, num_envs=num_envs, flat_only=flat_only, num_threads=num_threads, seed=seed)
     print(f"{num_envs} robots x {PPOCfg.num_steps} steps = {num_envs * PPOCfg.num_steps:,} samples per iteration "
           f"| {env.num_threads} physics threads | obs {env.num_obs}, actions {env.num_actions}")
 
@@ -82,21 +122,15 @@ def train(num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_iterations, flat_o
     if resume:
         policy, ckpt = load_policy(resume, device)
         if policy.num_obs != env.num_obs or policy.num_actions != env.num_actions:
-            raise ValueError(f"{resume} does not fit this environment")
+            raise ValueError(f"{resume} does not fit the '{task}' task (it was trained for '{ckpt.get('task', '?')}')")
         ppo = PPO(policy, num_envs, device)
         if "optimizer" in ckpt:
             ppo.optimizer.load_state_dict(ckpt["optimizer"])
             ppo.lr = ckpt.get("learning_rate", ppo.lr)
         start_iteration = ckpt.get("iteration", 0)
-        # carry the terrain curriculum over (resampled per terrain, so num_envs may differ between runs)
-        levels, names = ckpt.get("terrain_levels"), ckpt.get("terrain_level_names")
-        if levels and names and not flat_only:
-            rng = np.random.default_rng(seed)
-            levels, names = np.array(levels), np.array(names)
-            for row, name in enumerate(env.terrain.row_names):
-                ids = np.nonzero(env.env_row == row)[0]
-                if ids.size and (names == name).any() and not env.terrain.row_is_flat[row]:
-                    env.env_level[ids] = rng.choice(levels[names == name], ids.size)
+        # carry the curriculum over (num_envs may differ between runs)
+        if ckpt.get("curriculum") and not flat_only:
+            env.load_curriculum(ckpt["curriculum"], np.random.default_rng(seed))
         print(f"Resumed from {resume} (iteration {start_iteration})")
     else:
         policy = ActorCritic(env.num_obs, env.num_actions)
@@ -107,9 +141,7 @@ def train(num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_iterations, flat_o
 
     def checkpoint(name, iteration):
         path = os.path.join(run_dir, name)
-        obstacle = ~env.is_flat
-        extra = {"task": task, "terrain_levels": env.env_level[obstacle].tolist(),
-                 "terrain_level_names": [env.terrain.row_names[r] for r in env.env_row[obstacle]]}
+        extra = {"task": task, "curriculum": env.curriculum_state()}
         save_checkpoint(path, policy, ppo, iteration, extra)
         return path
 
@@ -177,9 +209,7 @@ def train(num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_iterations, flat_o
                 line = (f"it {iteration:5d}/{end_iteration} | {fps:7,.0f} steps/s "
                         f"(sim {t1 - t0:4.1f}s, learn {t2 - t1:4.1f}s) | return {mean_return:7.2f} "
                         f"| ep len {mean_length:6.1f} | fell {means.get('fell', 0.0):4.2f}")
-                if "terrain_level" in means:
-                    line += (f" | level {means['terrain_level']:4.2f}"
-                             f" ok {means.get('success', 0.0):4.2f}")
+                line += "".join(f" | {label} {means[key]:4.2f}" for label, key in env.progress_keys if key in means)
                 line += f" | std {losses['noise_std']:4.2f} | lr {losses['learning_rate']:.0e} | eta {eta / 60:5.1f} min"
                 print(line, flush=True)
             if iteration % PPOCfg.save_interval == 0:
@@ -194,8 +224,8 @@ def train(num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_iterations, flat_o
     minutes = (time.time() - start_time) / 60
     print("=" * 70)
     print(f"Done: {total_steps:,} steps in {minutes:.1f} min. Final model: {final_path}")
-    print(f"Watch it:   python main.py play --model {final_path}")
-    print(f"Continue:   python main.py train --resume {final_path}")
+    print(f"Watch it:   python main.py play --task {task} --model {final_path}")
+    print(f"Continue:   python main.py train --task {task} --resume {final_path}")
     return final_path
 
 

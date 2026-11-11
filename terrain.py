@@ -3,42 +3,46 @@ terrain.py
 
 Author: Usman Siddiqi
 
-Procedural terrain for the biped. The world is a grid of square tiles:
+Procedural hiking trails. A trail is a raised, winding path made of square rock
+columns (HikeCfg.cell wide), running from one end of a tile (x = -6 m) to the
+other (x = +6 m). Next to the trail the ground is far below, so stepping off it -
+or into the gap between two stepping stones - means falling.
 
-    row    = one terrain type (flat, rough, stairs, slopes, ...)
-    column = difficulty level 0 .. num_levels-1
+    row    = one kind of trail ("biome": rocky, climb, stones, ridge, ...)
+    level  = difficulty 0 .. num_levels-1: the trail gets narrower and swings
+             further left / right, steps get taller, gaps wider
 
-    tile (row, level) is centred at  x = (level + 0.5) * tile_size,  y = (row + 0.5) * tile_size
+A trail is assembled from sections, each 2-3 m long:
 
-Every non-flat tile is "radial": the robot starts on a flat platform in the
-middle and the obstacle (stairs, slope, bumps, ...) surrounds it as square
-rings, so the robot meets it whichever way it walks. "up" tiles are pits the
-robot climbs out of, "down" tiles are hills / pyramids it walks down from.
+    flat        plain trail                      rough     bumpy paving
+    steps       irregular rock steps up / down   steps_up / steps_down   a climb / a descent
+    stones      stepping stones over a gap       ridge     a narrow ridge
+    boulders    boulders next to the trail       (and for testing only: logs, terraces, rubble, stairs)
 
 The Terrain class does two jobs that must agree with each other:
 
-  1. build the collision geometry inside the MuJoCo model
-       - boxes for anything with vertical faces (stairs, blocks)
-       - height fields for smooth shapes (slopes, bumps, waves)
+  1. build the collision geometry: one MuJoCo model per tile, in which the
+     columns are merged into as few boxes as possible
   2. answer "how high is the ground at (x, y)?" for thousands of points at once
      (height scan, rewards, resets) from a pre-computed height raster
 
-Which terrain types exist and how hard they get is configured as a list of
-rows, see TerrainCfg.rows (training) and EvalCfg.unseen_terrains (held-out
-test terrains the policy never trains on) in config.py.
+Every tile also knows its path (centre line, elevation, width), which the
+environment uses to steer the robot and to notice when it left the trail.
 """
 
 import mujoco
 import numpy as np
 
-RES = 0.025     # resolution of the height lookup raster [m]
-HRES = 0.1      # resolution of MuJoCo height fields [m]
+from config import HikeCfg
+
+RES = 0.025         # resolution of the height lookup raster [m]
+QUANT = 0.005       # column heights are multiples of this [m]
 
 _COLORS = {
-    "flat": (0.45, 0.48, 0.52), "rough": (0.50, 0.56, 0.44), "stairs_up": (0.48, 0.58, 0.72),
-    "stairs_down": (0.78, 0.63, 0.47), "slope_up": (0.52, 0.66, 0.62), "slope_down": (0.72, 0.60, 0.66),
+    "flat": (0.45, 0.48, 0.52), "rocky": (0.62, 0.58, 0.50), "climb": (0.56, 0.60, 0.68),
+    "stones": (0.52, 0.64, 0.60), "ridge": (0.70, 0.60, 0.52), "trail": (0.64, 0.62, 0.54),
 }
-_DEFAULT_COLOR = (0.66, 0.62, 0.50)
+_DEFAULT_COLOR = (0.66, 0.58, 0.62)
 
 
 def _lerp(pair, t):
@@ -47,183 +51,280 @@ def _lerp(pair, t):
 
 
 class Tile:
-    """Geometry of one tile in local coordinates (origin at the tile centre, ground at z = 0)."""
+    """One trail. Arrays are indexed [ix, iy] (columns along the trail, cells across)."""
 
-    def __init__(self, size):
-        self.half = size / 2
-        self.boxes = []         # (x0, x1, y0, y1, top): solid from z = 0 up to `top`
-        self.hfield = None      # (n, n) heights >= 0 on a HRES grid, indexed [ix, iy]
+    def __init__(self, cfg):
+        self.nx = int(round(cfg.tile_length / cfg.cell))
+        self.ny = int(round(cfg.tile_width / cfg.cell))
+        self.x = -cfg.tile_length / 2 + (np.arange(self.nx) + 0.5) * cfg.cell
+        self.y = -cfg.tile_width / 2 + (np.arange(self.ny) + 0.5) * cfg.cell
+        self.height = np.zeros((self.nx, self.ny))      # top of every rock column (0 = no rock)
+        self.path_y = np.zeros(self.nx)                 # centre of the trail at every x
+        self.path_elev = np.zeros(self.nx)              # nominal height of the trail
+        self.path_hw = np.full(self.nx, 1e3)            # half width of the trail
+        self.boxes = []                                 # (x0, x1, y0, y1, top)
 
-    # ------------------------------------------------------------- helpers
-    def grid(self):
-        """Coordinates and Chebyshev (square ring) distance of the height field grid points."""
-        n = int(round(2 * self.half / HRES)) + 1
-        axis = np.linspace(-self.half, self.half, n)
-        x, y = np.meshgrid(axis, axis, indexing="ij")
-        return x, y, np.maximum(np.abs(x), np.abs(y))
+    def merge_boxes(self, cfg):
+        """Cover the columns with as few boxes as possible (greedy rectangles of equal height)."""
+        q = np.round(self.height / QUANT).astype(np.int64)
+        done = q == 0
+        x0, y0, c = -cfg.tile_length / 2, -cfg.tile_width / 2, cfg.cell
+        self.boxes = []
+        for i in range(self.nx):
+            for j in range(self.ny):
+                if done[i, j]:
+                    continue
+                h = q[i, j]
+                j1 = j + 1
+                while j1 < self.ny and q[i, j1] == h and not done[i, j1]:
+                    j1 += 1
+                i1 = i + 1
+                while i1 < self.nx and (q[i1, j:j1] == h).all() and not done[i1, j:j1].any():
+                    i1 += 1
+                done[i:i1, j:j1] = True
+                self.boxes.append((x0 + i * c, x0 + i1 * c, y0 + j * c, y0 + j1 * c, h * QUANT))
 
-    def add_ring(self, inner, top):
-        """Square ring reaching from `inner` to the tile border, as four non-overlapping slabs."""
-        h = self.half
-        self.boxes += [(inner, h, -h, h, top), (-h, -inner, -h, h, top),
-                       (-inner, inner, inner, h, top), (-inner, inner, -h, -inner, top)]
-
-    def add_square(self, size, top):
-        self.boxes.append((-size, size, -size, size, top))
-
-    def add_stairs(self, start, runs, rises, direction, base=0.0):
-        """
-        Square staircase around the centre. Step k begins at distance
-        start + runs[0] + ... + runs[k-1] and is rises[k] higher (direction "up")
-        or lower ("down") than the previous one.
-        """
-        runs = [max(RES, round(r / RES) * RES) for r in runs]      # keep edges on the raster grid
-        edges = start + np.concatenate([[0.0], np.cumsum(runs)])
-        if direction == "up":
-            height = base
-            for k, rise in enumerate(rises):
-                height += rise
-                self.add_ring(edges[k], height)
-        else:
-            height = base + float(np.sum(rises))
-            self.add_square(edges[0], height)                       # the top platform
-            for k, rise in enumerate(rises[:-1]):
-                height -= rise
-                self.add_square(edges[k + 1], height)
-        return edges[-1]
-
-    # ------------------------------------------------------------ raster
-    def rasterize(self):
-        """Height of the tile surface on the RES grid (cell centres), indexed [ix, iy]."""
-        n = int(round(2 * self.half / RES))
-        out = np.zeros((n, n), dtype=np.float32)
-        if self.hfield is not None:
-            centres = (np.arange(n) + 0.5) * RES / HRES             # in height field index units
-            i0 = np.clip(np.floor(centres).astype(int), 0, self.hfield.shape[0] - 2)
-            f = (centres - i0).astype(np.float32)
-            hf = self.hfield.astype(np.float32)
-            a = hf[i0][:, i0] * (1 - f)[None, :] + hf[i0][:, i0 + 1] * f[None, :]
-            b = hf[i0 + 1][:, i0] * (1 - f)[None, :] + hf[i0 + 1][:, i0 + 1] * f[None, :]
-            out = np.maximum(out, a * (1 - f)[:, None] + b * f[:, None])
-        for x0, x1, y0, y1, top in self.boxes:
-            i0, i1 = int(round((x0 + self.half) / RES)), int(round((x1 + self.half) / RES))
-            j0, j1 = int(round((y0 + self.half) / RES)), int(round((y1 + self.half) / RES))
-            out[i0:i1, j0:j1] = np.maximum(out[i0:i1, j0:j1], top)
-        return out
+    def rasterize(self, cfg):
+        k = int(round(cfg.cell / RES))
+        return np.repeat(np.repeat(self.height, k, axis=0), k, axis=1).astype(np.float32)
 
 
-# ---------------------------------------------------------------- generators
-# Each generator fills a Tile for difficulty t in [0, 1] (level / (num_levels - 1)).
+# ------------------------------------------------------------------ sections
+class _Builder:
+    """Working state while a trail is assembled section by section."""
 
-def _gen_flat(tile, row, t, rng, cfg):
+    def __init__(self, tile, row, t, rng, cfg):
+        self.tile, self.row, self.t, self.rng, self.cfg = tile, row, t, rng, cfg
+        nx, ny = tile.nx, tile.ny
+        self.elev_left = np.zeros(nx)       # height of the left (+y) / right half of the trail
+        self.elev_right = np.zeros(nx)
+        self.bump = np.zeros((nx, ny))      # added on top, per column
+        self.solid = np.ones((nx, ny), dtype=bool)
+        self.center = np.zeros(nx)          # centre line of the trail
+        self.half_width = np.zeros(nx)
+        self.path_y = np.full(nx, np.nan)   # where the robot should walk (nan = interpolate)
+        self.boulders = []                  # (i0, i1, j0, j1, height)
+        self.e = cfg.base_elevation
+
+    def param(self, name):
+        return _lerp(self.row.get(name, getattr(self.cfg, name)), self.t)
+
+    def cells(self, metres, minimum=1):
+        return max(minimum, int(round(metres / self.cfg.cell)))
+
+    def set_elevation(self, i, e, shift_right=0):
+        """From column i on the trail is at height e (the right half `shift_right` columns later)."""
+        self.elev_left[i:] = e
+        self.elev_right[max(i + shift_right, 0):] = e
+        self.e = e
+
+
+def _sec_flat(b, i0, i1):
     pass
 
 
-def _gen_rough(tile, row, t, rng, cfg):
-    """Random bumps: uniform noise on a 20 cm grid, `height` is the peak-to-peak size."""
-    amplitude = _lerp(row["height"], t)
-    x, y, dist = tile.grid()
-    n = x.shape[0]
-    coarse = rng.uniform(0.0, amplitude, ((n + 1) // 2, (n + 1) // 2))
-    fine_axis, coarse_axis = np.arange(n), np.arange(coarse.shape[0]) * 2
-    rows_interp = np.stack([np.interp(fine_axis, coarse_axis, c) for c in coarse])
-    noise = np.stack([np.interp(fine_axis, coarse_axis, c) for c in rows_interp.T]).T
-    tile.hfield = noise * np.clip((dist - 0.6) / 0.4, 0.0, 1.0)     # keep the spawn area flat
+def _block_noise(b, i0, i1, block, amplitude):
+    rng = b.rng
+    nbx, nby = (i1 - i0) // block + 1, b.tile.ny // block + 1
+    noise = np.repeat(np.repeat(rng.uniform(0.0, amplitude, (nbx, nby)), block, axis=0), block, axis=1)
+    b.bump[i0:i1, :] += noise[:i1 - i0, :b.tile.ny]
 
 
-def _gen_stairs(tile, row, t, rng, cfg):
-    """Regular stairs: `rise` grows with the level, the `run` (tread depth) is random per tile."""
-    rise = _lerp(row["rise"], t)
-    run = rng.uniform(*row["run"])
-    run = round(run / RES) * RES
-    steps = int(min(row.get("max_steps", 8), np.floor(cfg.obstacle_extent / run + 1e-6)))
-    tile.add_stairs(cfg.platform_half, [run] * steps, [rise] * steps, row["direction"])
+def _sec_rough(b, i0, i1):
+    """Bumpy paving: 37.5 cm slabs at random heights."""
+    _block_noise(b, i0, i1, 3, b.param("rough_height"))
 
 
-def _gen_irregular_stairs(tile, row, t, rng, cfg):
-    """Every step has its own random rise and run."""
-    rise = _lerp(row["rise"], t)
-    runs, rises, total = [], [], 0.0
-    while True:
-        run = round(rng.uniform(*row["run"]) / RES) * RES
-        if total + run > cfg.obstacle_extent + 1e-6:
+def _sec_rubble(b, i0, i1):
+    """(test only) smaller and taller bumps than `rough`."""
+    _block_noise(b, i0, i1, 2, _lerp((0.03, 0.14), b.t))
+
+
+def _steps(b, i0, i1, direction, regular=False):
+    rng, cfg, t = b.rng, b.cfg, b.t
+    lo, hi = cfg.elevation_range
+    rise_max = b.param("step_rise")
+    i = i0 + 2
+    regular_run = b.cells(max(0.25, 1.5 * rise_max))
+    while i < i1 - 2:
+        rise = rise_max if regular else rise_max * rng.uniform(0.6, 1.0)
+        sign = {"up": 1.0, "down": -1.0}.get(direction, rng.choice([-1.0, 1.0]))
+        if b.e + sign * rise > hi or b.e + sign * rise < lo:
+            sign = -sign
+        # sometimes the edge of a step is broken: one half of the trail steps up earlier than the other
+        shift = int(rng.choice([-2, -1, 1, 2])) if (not regular and rng.random() < 0.6 * t) else 0
+        b.set_elevation(i, b.e + sign * rise, shift)
+        run = regular_run if regular else b.cells(rng.uniform(_lerp((0.75, 0.375), t), _lerp((1.0, 0.625), t)))
+        i += max(run, b.cells(1.6 * rise), abs(shift) + 1)
+
+
+def _sec_steps(b, i0, i1):
+    """Irregular rock steps, randomly up or down."""
+    _steps(b, i0, i1, "mixed")
+
+
+def _sec_steps_up(b, i0, i1):
+    _steps(b, i0, i1, "up")
+
+
+def _sec_steps_down(b, i0, i1):
+    _steps(b, i0, i1, "down")
+
+
+def _sec_stairs_up(b, i0, i1):
+    """(test only) a regular staircase."""
+    _steps(b, i0, i1, "up", regular=True)
+
+
+def _sec_stairs_down(b, i0, i1):
+    _steps(b, i0, i1, "down", regular=True)
+
+
+def _sec_stones(b, i0, i1):
+    """Stepping stones: only the stones are solid, they zigzag and (on higher levels) have gaps between them."""
+    rng, tile, t = b.rng, b.tile, b.t
+    half, zig = b.param("stone_half_width"), b.param("stone_zigzag")
+    gap = int(round(b.param("stone_gap") / b.cfg.cell))
+    a, end = i0 + 2, i1 - 2
+    if end - a < 4 + 2 * gap:
+        return
+    b.solid[a:end, :] = False
+    b.path_y[a:end] = np.nan
+    i, side = a + gap, rng.choice([-1.0, 1.0])
+    while i < end - gap:
+        n = int(rng.integers(3, 6))
+        if end - gap - (i + n) < 3 + gap:           # no room for another stone: this one is the last
+            n = end - gap - i
+        offset = side * zig * rng.uniform(0.5, 1.0)
+        top = rng.uniform(0.0, 0.06) * t
+        for k in range(i, i + n):
+            on = np.abs(tile.y - (b.center[k] + offset)) <= half
+            b.solid[k, on] = True
+            b.bump[k, on] += top
+            b.path_y[k] = b.center[k] + offset
+        i += n + gap
+        side = -side
+
+
+def _sec_ridge(b, i0, i1):
+    """A narrow ridge."""
+    b.half_width[i0:i1] = b.param("ridge_half_width")
+
+
+def _sec_boulders(b, i0, i1):
+    """A wide stretch with boulders close to the line the robot walks."""
+    rng, tile, cfg = b.rng, b.tile, b.cfg
+    b.half_width[i0:i1] = np.maximum(b.half_width[i0:i1], 1.5)
+    for _ in range(int(round(b.param("boulders")))):
+        size = int(rng.integers(3, 6))
+        if i1 - 2 - size <= i0 + 2:
             break
-        runs.append(run)
-        rises.append(rise * rng.uniform(*row["rise_jitter"]))
-        total += run
-    tile.add_stairs(cfg.platform_half, runs, rises, row["direction"])
+        ic = int(rng.integers(i0 + 2, i1 - 2 - size))
+        side = rng.choice([-1.0, 1.0])
+        clearance = b.param("boulder_clearance") + rng.uniform(0.0, 0.3)
+        near = b.center[max(ic - 2, 0):ic + size + 2]
+        face = (near.max() if side > 0 else near.min()) + side * clearance
+        j0 = int(np.floor((min(face, face + side * size * cfg.cell) + cfg.tile_width / 2) / cfg.cell + 0.5))
+        b.boulders.append((ic, ic + size, max(j0, 0), min(j0 + size, tile.ny), rng.uniform(0.5, 0.9)))
 
 
-def _gen_landing_stairs(tile, row, t, rng, cfg):
-    """Flights of a few steps separated by flat landings, like a staircase in a building."""
-    rise, run = _lerp(row["rise"], t), row["run"]
-    runs, rises = [], []
-    for flight in range(row["flights"]):
-        # the last tread of a flight is the landing
-        runs += [run] * (row["steps_per_flight"] - 1) + [run if flight == row["flights"] - 1 else row["landing"]]
-        rises += [rise] * row["steps_per_flight"]
-    tile.add_stairs(cfg.platform_half, runs, rises, row["direction"])
+def _sec_logs(b, i0, i1):
+    """(test only) logs lying across the trail."""
+    rng, i = b.rng, i0 + 3
+    while i < i1 - 3:
+        thick = int(rng.integers(1, 3))
+        b.bump[i:i + thick, :] += _lerp((0.04, 0.20), b.t) * rng.uniform(0.7, 1.0)
+        i += thick + b.cells(rng.uniform(0.9, 1.4))
 
 
-def _gen_slope(tile, row, t, rng, cfg):
-    """Square ramp: a bowl ("up") or a hill ("down") with the given slope (rise / run)."""
-    slope = _lerp(row["slope"], t)
-    x, y, dist = tile.grid()
-    ramp = np.clip(dist - cfg.platform_half, 0.0, cfg.obstacle_extent)
-    height = slope * (ramp if row["direction"] == "up" else cfg.obstacle_extent - ramp)
-    bumps = row.get("roughness", 0.0)
-    if bumps:
-        height = height + rng.uniform(0.0, bumps, height.shape) * np.clip((dist - 0.8) / 0.2, 0.0, 1.0)
-    tile.hfield = height
+def _sec_terraces(b, i0, i1):
+    """(test only) the left and the right half of the trail at different heights."""
+    rng, tile, i = b.rng, b.tile, i0 + 2
+    side = rng.choice([-1.0, 1.0])
+    while i < i1 - 2:
+        n = min(b.cells(rng.uniform(1.25, 1.75)), i1 - 2 - i)
+        for k in range(i, i + n):
+            b.bump[k, side * (tile.y - b.center[k]) > 0] += _lerp((0.04, 0.18), b.t)
+        i += n
+        side = -side
 
 
-def _gen_waves(tile, row, t, rng, cfg):
-    """Rolling sinusoidal ground, `height` is the peak-to-peak size."""
-    amplitude, k = _lerp(row["height"], t), 2 * np.pi / row["wavelength"]
-    x, y, dist = tile.grid()
-    wave = amplitude * (2.0 - np.cos(k * x) - np.cos(k * y)) / 4.0
-    tile.hfield = wave * np.clip((dist - 0.5) / 0.5, 0.0, 1.0)
-
-
-def _gen_blocks(tile, row, t, rng, cfg):
-    """Randomly scattered rectangular blocks of random height (up to `height`)."""
-    top = _lerp(row["height"], t)
-    reach = cfg.platform_half + cfg.obstacle_extent
-    for _ in range(row["count"]):
-        w, d = rng.uniform(0.4, 1.2, 2)
-        cx, cy = rng.uniform(-reach, reach, 2)
-        x0, x1, y0, y1 = cx - w / 2, cx + w / 2, cy - d / 2, cy + d / 2
-        if max(abs(cx), abs(cy)) - max(w, d) / 2 < 0.7:             # keep the spawn area clear
-            continue
-        snap = lambda v: round(np.clip(v, -tile.half, tile.half) / RES) * RES
-        tile.boxes.append((snap(x0), snap(x1), snap(y0), snap(y1), top * rng.uniform(0.4, 1.0)))
-
-
-def _gen_ramp_stairs(tile, row, t, rng, cfg):
-    """A ramp that leads into a staircase."""
-    slope, rise, run = _lerp(row["slope"], t), _lerp(row["rise"], t), row["run"]
-    ramp_len = row["ramp_length"]
-    x, y, dist = tile.grid()
-    tile.hfield = slope * np.clip(dist - cfg.platform_half, 0.0, ramp_len)
-    steps = int(np.floor((cfg.obstacle_extent - ramp_len) / run + 1e-6))
-    tile.add_stairs(cfg.platform_half + ramp_len, [run] * steps, [rise] * steps, "up", base=slope * ramp_len)
-
-
-GENERATORS = {
-    "flat": _gen_flat, "rough": _gen_rough, "stairs": _gen_stairs, "irregular_stairs": _gen_irregular_stairs,
-    "landing_stairs": _gen_landing_stairs, "slope": _gen_slope, "waves": _gen_waves, "blocks": _gen_blocks,
-    "ramp_stairs": _gen_ramp_stairs,
+SECTIONS = {
+    "flat": _sec_flat, "rough": _sec_rough, "steps": _sec_steps, "steps_up": _sec_steps_up,
+    "steps_down": _sec_steps_down, "stones": _sec_stones, "ridge": _sec_ridge, "boulders": _sec_boulders,
+    # only used by the held-out test trails
+    "logs": _sec_logs, "terraces": _sec_terraces, "rubble": _sec_rubble,
+    "stairs_up": _sec_stairs_up, "stairs_down": _sec_stairs_down,
 }
 
 
+def make_trail(row, t, rng, cfg=HikeCfg):
+    """Generate one trail of the given row at difficulty t in [0, 1]."""
+    tile = Tile(cfg)
+    b = _Builder(tile, row, t, rng, cfg)
+    x, nx = tile.x, tile.nx
+
+    # ---- centre line: random swings left / right, smoothly joined
+    hw = b.param("half_width")
+    swing = b.param("winding")
+    limit = cfg.tile_width / 2 - 1.5 - 0.3              # boulder sections are 1.5 m wide on each side
+    knots_x = np.arange(-4.75, 5.3, 2.0)
+    knots_y = np.zeros(knots_x.size)
+    max_change = row.get("max_swing_change", 1.2 if swing <= 1.6 else 2.0)
+    for k in range(1, knots_x.size):
+        target = rng.uniform(-swing, swing)
+        knots_y[k] = np.clip(np.clip(target, knots_y[k - 1] - max_change, knots_y[k - 1] + max_change), -limit, limit)
+    seg = np.clip(np.searchsorted(knots_x, x) - 1, 0, knots_x.size - 2)
+    u = np.clip((x - knots_x[seg]) / (knots_x[seg + 1] - knots_x[seg]), 0.0, 1.0)
+    b.center = knots_y[seg] + (knots_y[seg + 1] - knots_y[seg]) * (1 - np.cos(np.pi * u)) / 2
+    b.center = np.round(b.center / cfg.cell) * cfg.cell + cfg.cell / 2 * 0     # centre on a cell edge
+    b.path_y[:] = b.center
+    b.half_width[:] = hw
+    b.set_elevation(0, cfg.base_elevation)
+
+    # ---- sections between the start pad and the goal pad
+    first = int(np.searchsorted(x, -4.75))
+    last = int(np.searchsorted(x, 5.0))
+    b.half_width[:first] = np.maximum(hw, 1.0)
+    b.half_width[last:] = np.maximum(hw, 1.0)
+    i = first
+    while i < last:
+        n = b.cells(rng.uniform(1.75, 3.0))
+        if last - (i + n) < b.cells(1.5):
+            n = last - i
+        b.set_elevation(i, b.e)                         # squares off a broken step edge left by the last section
+        SECTIONS[str(rng.choice(row["sections"]))](b, i, i + n)
+        i += n
+    b.set_elevation(last, b.e)
+
+    # ---- assemble the column heights
+    y = tile.y[None, :]
+    on_trail = np.abs(y - b.center[:, None]) <= b.half_width[:, None] + 1e-9
+    base = np.where(y >= b.center[:, None], b.elev_left[:, None], b.elev_right[:, None])
+    height = np.where(on_trail & b.solid, base + b.bump, 0.0)
+    ground = height.copy()
+    for i0, i1, j0, j1, h in b.boulders:
+        block = ground[i0:i1, j0:j1]
+        if block.size:
+            height[i0:i1, j0:j1] = np.where(block > 0, np.maximum(height[i0:i1, j0:j1], block.max() + h), 0.0)
+    tile.height = np.round(height / QUANT) * QUANT
+
+    known = ~np.isnan(b.path_y)
+    tile.path_y = np.interp(np.arange(nx), np.nonzero(known)[0], b.path_y[known])
+    tile.path_elev = np.minimum(b.elev_left, b.elev_right)
+    tile.path_hw = b.half_width.copy()
+    tile.merge_boxes(cfg)
+    return tile
+
+
 class Terrain:
-    def __init__(self, rows, cfg, seed=0):
+    def __init__(self, rows, cfg=HikeCfg, seed=0):
         """
         Args:
-            rows: list of row dicts, each with "name", "kind" (a key of GENERATORS),
-                  "weight" (share of robots) and the parameters of that generator
-            cfg: TerrainCfg
-            seed: seed for the random parts of the tiles
+            rows: list of row dicts with "name", "kind" ("flat" or "trail"), "weight" (share of
+                  robots), "sections" and optional overrides of the HikeCfg difficulty ranges
+            cfg: HikeCfg
+            seed: seed of the random trail layouts
         """
         self.cfg = cfg
         self.rows = [dict(r) for r in rows]
@@ -233,79 +334,79 @@ class Terrain:
         self.row_names = [r["name"] for r in self.rows]
         self.row_is_flat = np.array([r["kind"] == "flat" for r in self.rows])
         self.num_levels = 1 if self.row_is_flat.all() else cfg.num_levels
-        self.tile = float(cfg.tile_size)
-        if cfg.platform_half + cfg.obstacle_extent + 0.3 > cfg.success_distance or \
-                cfg.success_distance > self.tile / 2 - 0.5:
-            raise ValueError("TerrainCfg: tile_size / obstacle_extent / success_distance do not fit together")
 
         rng = np.random.default_rng(seed)
-        n = int(round(self.tile / RES))
-        self._raster = np.zeros((self.num_levels * n, self.num_rows * n), dtype=np.float32)
-        self._tiles = {}
+        self.tiles = [Tile(cfg)]                                    # tile 0: flat ground
+        self.tile_row, self.tile_level = [0], [0]
+        self.tile_index = np.zeros((self.num_rows, self.num_levels), dtype=np.int64)
         for r, row in enumerate(self.rows):
             if row["kind"] == "flat":
                 continue
             for level in range(self.num_levels):
-                tile = Tile(self.tile)
                 t = level / max(self.num_levels - 1, 1)
-                GENERATORS[row["kind"]](tile, row, t, rng, cfg)
-                self._tiles[(r, level)] = tile
-                self._raster[level * n:(level + 1) * n, r * n:(r + 1) * n] = tile.rasterize()
+                self.tile_index[r, level] = len(self.tiles)
+                self.tiles.append(make_trail(row, t, rng, cfg))
+                self.tile_row.append(r)
+                self.tile_level.append(level)
+        self.num_tiles = len(self.tiles)
+
+        self._raster = np.stack([tile.rasterize(cfg) for tile in self.tiles])
         self._inv_res = 1.0 / RES
-        self._max_ix, self._max_iy = self._raster.shape[0] - 1, self._raster.shape[1] - 1
+        self._half_x, self._half_y = cfg.tile_length / 2, cfg.tile_width / 2
+        self._max_ix, self._max_iy = self._raster.shape[1] - 1, self._raster.shape[2] - 1
+
+        # path of every tile, sampled at the column centres
+        self.path_x = self.tiles[0].x.copy()
+        self.path_y = np.stack([tile.path_y for tile in self.tiles])
+        self.path_elev = np.stack([tile.path_elev for tile in self.tiles])
+        self.path_hw = np.stack([tile.path_hw for tile in self.tiles])
+        # index of the path point `lookahead` metres (along the path) ahead of every column
+        self.look_index = np.zeros_like(self.path_y, dtype=np.int64)
+        nx = self.path_x.size
+        for k in range(self.num_tiles):
+            step = np.hypot(np.diff(self.path_x), np.diff(self.path_y[k]))
+            arc = np.concatenate([[0.0], np.cumsum(step)])
+            self.look_index[k] = np.clip(np.searchsorted(arc, arc + cfg.lookahead), 0, nx - 1)
 
     # ------------------------------------------------------------------ queries
-    def tile_center(self, row, level):
-        """Centre (x, y) of tiles; row/level can be arrays."""
-        return (np.asarray(level) + 0.5) * self.tile, (np.asarray(row) + 0.5) * self.tile
+    def height(self, tile, x, y):
+        """Terrain height [m] at points (x, y) of the given tiles. tile broadcasts against x and y."""
+        ix = np.clip(np.floor((np.asarray(x) + self._half_x) * self._inv_res), 0, self._max_ix).astype(np.int64)
+        iy = np.clip(np.floor((np.asarray(y) + self._half_y) * self._inv_res), 0, self._max_iy).astype(np.int64)
+        return self._raster[tile, ix, iy].astype(np.float64)
 
-    def height(self, x, y):
-        """Terrain height [m] at world points (x, y). Works on arrays of any shape."""
-        ix = np.clip(np.floor(np.asarray(x) * self._inv_res), 0, self._max_ix).astype(np.int64)
-        iy = np.clip(np.floor(np.asarray(y) * self._inv_res), 0, self._max_iy).astype(np.int64)
-        return self._raster[ix, iy].astype(np.float64)
-
-    def distance_from_center(self, x, y, row, level):
-        cx, cy = self.tile_center(row, level)
-        return np.maximum(np.abs(x - cx), np.abs(y - cy))
+    def column(self, x):
+        """Index of the path point at position x."""
+        return np.clip(np.floor((np.asarray(x) + self._half_x) / self.cfg.cell), 0, self.path_x.size - 1).astype(np.int64)
 
     # ----------------------------------------------------------------- geometry
-    def add_to_spec(self, spec):
-        """Add the ground plane and all tiles to a mujoco.MjSpec."""
-        world = spec.worldbody
-        world.add_geom(
-            name="ground", type=mujoco.mjtGeom.mjGEOM_PLANE, size=[0, 0, 0.05],
-            material="grid", contype=0, conaffinity=1,
-        )
-        for (r, level), tile in self._tiles.items():
-            cx, cy = self.tile_center(r, level)
-            base = np.array(_COLORS.get(self.rows[r]["name"], _DEFAULT_COLOR))
-            shade = 0.8 + 0.2 * level / max(self.num_levels - 1, 1)
-            if tile.hfield is not None and tile.hfield.max() > 1e-4:
-                top = float(tile.hfield.max())
-                name = f"hfield_{r}_{level}"
-                n = tile.hfield.shape[0]
-                # MuJoCo stores height fields row by row along y, normalised to [0, 1]
-                spec.add_hfield(name=name, nrow=n, ncol=n, size=[tile.half, tile.half, top, 0.05],
-                                userdata=(tile.hfield.T / top).ravel().tolist())
-                # 2 mm below the ground plane so flat parts do not collide / render twice
-                world.add_geom(type=mujoco.mjtGeom.mjGEOM_HFIELD, hfieldname=name, pos=[cx, cy, -0.002],
-                               rgba=[*(base * shade), 1], contype=0, conaffinity=1)
-            for i, (x0, x1, y0, y1, top) in enumerate(tile.boxes):
-                if top <= 1e-6 or x1 - x0 <= 1e-6 or y1 - y0 <= 1e-6:
-                    continue
-                tint = shade - 0.05 * (i // 4 % 2 if len(tile.boxes) > 12 else i % 2)
-                world.add_geom(
-                    type=mujoco.mjtGeom.mjGEOM_BOX, pos=[cx + (x0 + x1) / 2, cy + (y0 + y1) / 2, top / 2],
-                    size=[(x1 - x0) / 2, (y1 - y0) / 2, top / 2], rgba=[*(base * tint), 1],
-                    contype=0, conaffinity=1,
-                )
-
-
-def build_model(sim_cfg, terrain):
-    """Load the robot MJCF, add the terrain and compile to an MjModel."""
-    spec = mujoco.MjSpec.from_file(sim_cfg.model_path)
-    terrain.add_to_spec(spec)
-    model = spec.compile()
-    model.opt.timestep = sim_cfg.timestep
-    return model
+    def build_models(self, sim_cfg):
+        """One compiled MjModel per tile (robot + ground + that trail). All have identical sizes."""
+        most = max(len(tile.boxes) for tile in self.tiles)
+        models = []
+        for k, tile in enumerate(self.tiles):
+            spec = mujoco.MjSpec.from_file(sim_cfg.model_path)
+            world = spec.worldbody
+            world.add_geom(name="ground", type=mujoco.mjtGeom.mjGEOM_PLANE, size=[0, 0, 0.05],
+                           material="grid", contype=0, conaffinity=1)
+            row = self.rows[self.tile_row[k]]
+            base = np.array(_COLORS.get(row["name"], _DEFAULT_COLOR))
+            lo = self.cfg.elevation_range[0]
+            for x0, x1, y0, y1, top in tile.boxes:
+                # lighter with height, plus a little variation so neighbouring rocks can be told apart
+                shade = 0.62 + 0.22 * np.clip((top - lo) / 2.0, 0.0, 1.0) + 0.09 * np.sin(37.0 * x0 + 91.0 * y0 + 53.0 * top)
+                world.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, pos=[(x0 + x1) / 2, (y0 + y1) / 2, top / 2],
+                               size=[(x1 - x0) / 2, (y1 - y0) / 2, top / 2],
+                               rgba=[*np.clip(base * shade / 0.8, 0.0, 1.0), 1], contype=0, conaffinity=1)
+            for _ in range(most - len(tile.boxes)):
+                # invisible filler far below the ground, so that all tile models have the same sizes
+                # (number of geoms and collision tree nodes) and can share simulation buffers
+                world.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, pos=[0, 0, -50], size=[0.01, 0.01, 0.01],
+                               rgba=[0, 0, 0, 0], contype=0, conaffinity=1)
+            model = spec.compile()
+            model.opt.timestep = sim_cfg.timestep
+            models.append(model)
+        sizes = {(m.nq, m.nv, m.nu, m.ngeom, m.nbvh, m.nsensordata) for m in models}
+        if len(sizes) != 1:
+            raise RuntimeError(f"tile models differ in size: {sizes}")
+        return models
