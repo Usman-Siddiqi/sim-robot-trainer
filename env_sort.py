@@ -264,13 +264,18 @@ class SortEnv(RobotEnv):
         hx, hy, hz = self.box_half.T
 
         # where the palms belong: on the two faces of the box that point left / right as seen by the
-        # robot, with their upper edge just under the rim
+        # robot, anywhere along them, with their upper edge just under the rim
+        fwd = np.stack([np.cos(self.yaw), np.sin(self.yaw), np.zeros(n)], axis=1)
         left = np.stack([-np.sin(self.yaw), np.cos(self.yaw), np.zeros(n)], axis=1)
         reach = np.abs((left * bx).sum(1)) * hx + np.abs((left * by).sum(1)) * hy + np.abs((left * bz).sum(1)) * hz
+        depth = np.abs((fwd * bx).sum(1)) * hx + np.abs((fwd * by).sum(1)) * hy + np.abs((fwd * bz).sum(1)) * hz
         middle = self.box_pos + bz * (hz - cfg.rim_thickness - 0.055)[:, None]
-        self.grip_dist = np.stack([
-            np.linalg.norm(self.grip_pos[:, 0] - (middle + left * reach[:, None]), axis=1),
-            np.linalg.norm(self.grip_pos[:, 1] - (middle - left * reach[:, None]), axis=1)], axis=1)
+        dist = []
+        for k, side in enumerate((1.0, -1.0)):
+            rel = self.grip_pos[:, k] - middle
+            along = np.clip((rel * fwd).sum(axis=1), -(depth - 0.04), depth - 0.04)
+            dist.append(np.linalg.norm(rel - fwd * along[:, None] - side * left * reach[:, None], axis=1))
+        self.grip_dist = np.stack(dist, axis=1)
         gripped = (self.grip_dist < cfg.grip_distance).all(axis=1)
 
         # the box relative to the tables
