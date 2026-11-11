@@ -54,18 +54,6 @@ def find_latest_model(models_dir=MODEL_SAVE_PATH, task=None):
     return None
 
 
-def make_env(task, **kwargs):
-    """Create the environment of a task ("hike" or "sort")."""
-    if task == "hike":
-        from env_hike import HikeEnv
-        return HikeEnv(**kwargs)
-    if task == "sort":
-        from env_sort import SortEnv
-        kwargs.pop("flat_only", None)
-        return SortEnv(guide=SortCfg.guide_start, mass_level=SortCfg.mass_start, **kwargs)
-    raise ValueError(f"unknown task '{task}' (hike or sort)")
-
-
 def train(task="hike", num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_iterations, flat_only=False,
           device="auto", num_threads=None, resume=None, run_name=None, seed=0,
           save_path=MODEL_SAVE_PATH, log_path=LOG_PATH, init_from=None):
