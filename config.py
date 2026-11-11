@@ -294,6 +294,7 @@ class SortCfg:
     palm_solimp = [0.98, 0.99, 0.001, 0.5, 2.0]
 
     stand_off = 0.34                # torso <-> box distance for picking up / putting down [m]
+    grip_force = 3.0                # a box counts as gripped when two opposite faces each feel this force [N]
     lift_height = 0.08              # a box counts as picked up when it is this far above the table [m]
     place_margin = 0.07             # a placed box must be at least this far inside the table edge [m]
     place_hold_s = 0.3              # ... lie still for this long

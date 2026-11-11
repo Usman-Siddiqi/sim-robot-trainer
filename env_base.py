@@ -97,7 +97,7 @@ class RobotEnv:
         self.scene_models = scene_models
         m = scene_models[0]
         nu = self.num_actions
-        if m.nu != nu or m.nsensordata != _NUM_SENSOR or m.na != 0:
+        if m.nu != nu or m.nsensordata < _NUM_SENSOR or m.na != 0:
             raise RuntimeError("robot/humanoid.xml does not match what env_base.py expects")
         for i, name in enumerate(RobotCfg.joint_names):
             if mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_ACTUATOR, i) != name:
@@ -130,7 +130,7 @@ class RobotEnv:
 
         self.state = np.zeros((n, nstate))
         self._state_traj = np.zeros((n, SimCfg.decimation, nstate))
-        self._sensor_traj = np.zeros((n, SimCfg.decimation, _NUM_SENSOR))
+        self._sensor_traj = np.zeros((n, SimCfg.decimation, m.nsensordata))      # tasks may add sensors of their own
         self._ctrl = np.zeros((n, 1, nu))
 
         # ------------------------------------------------------ robot constants
@@ -246,6 +246,7 @@ class RobotEnv:
         self.foot_up = sensors[:, _FOOT_UP].reshape(-1, 2, 3)
         self.palm_touch = self._sensor_traj[:, :, _PALM_TOUCH].mean(axis=1)
         self.grip_pos = sensors[:, _GRIP_POS].reshape(-1, 2, 3)
+        self._read_task_sensors(self._sensor_traj[:, :, _NUM_SENSOR:])
 
         self.episode_length += 1
         self.common_step += 1
@@ -308,6 +309,9 @@ class RobotEnv:
     # ============================================================ task hooks
     def _reset_envs(self, ids):
         raise NotImplementedError
+
+    def _read_task_sensors(self, sensors):
+        """Hook: sensors a task added to the model, (N, decimation, extra) for the last control step."""
 
     def _update_task(self):
         """Commands / task state, called after every kinematics update."""
