@@ -205,8 +205,6 @@ class SortEnv(RobotEnv):
         y = np.where(near, stand[1] - out[1] * rng.uniform(0.0, 0.25, n) + rng.uniform(-0.08, 0.08, n), r * np.sin(a))
         yaw = np.where(near, facing + rng.uniform(-0.3, 0.3, n), rng.uniform(-np.pi, np.pi, n))
         self._robot_reset_state(ids, x, y, RobotCfg.init_height, yaw)
-        self.grip_pos[ids] = 0.0
-        self.palm_touch[ids] = 0.0
 
     def _update_task(self):
         """Work out, from the physical state alone, which stage every robot is in and how far along."""

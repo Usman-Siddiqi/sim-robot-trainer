@@ -120,6 +120,7 @@ class RobotEnv:
 
         self._rollout = rollout.Rollout(nthread=self.num_threads)
         self._datas = [mujoco.MjData(m) for _ in range(self.num_threads)]
+        self._scratch = mujoco.MjData(m)
         self._state_spec = mujoco.mjtState.mjSTATE_FULLPHYSICS
         nstate = mujoco.mj_stateSize(m, self._state_spec)
         assert nstate == 1 + m.nq + m.nv
@@ -210,6 +211,7 @@ class RobotEnv:
         """Reset every robot and return the first observation."""
         ids = np.arange(self.num_envs)
         self._reset_envs(ids)
+        self._refresh_sensors(ids)
         self._update_kinematics()
         self._update_task()
         return self._compute_obs()
@@ -263,6 +265,7 @@ class RobotEnv:
             info["episode"] = self._episode_stats(ids, info)
             self._on_episode_end(ids, info)
             self._reset_envs(ids)
+            self._refresh_sensors(ids)
 
         if self.push_robots and self.common_step % self.push_interval == 0:
             self._push()
@@ -364,6 +367,20 @@ class RobotEnv:
         self.contact[ids] = True
         for v in self.episode_sums.values():
             v[ids] = 0.0
+
+    def _refresh_sensors(self, ids):
+        """Foot and palm positions of robots that were just reset (otherwise they would be one step stale)."""
+        d = self._scratch
+        for i in ids:
+            model = self._models[i]
+            mujoco.mj_setState(model, d, self.state[i], self._state_spec)
+            mujoco.mj_kinematics(model, d)
+            mujoco.mj_sensorPos(model, d)
+            self.foot_pos[i] = d.sensordata[_FOOT_POS].reshape(2, 3)
+            self.foot_up[i] = d.sensordata[_FOOT_UP].reshape(2, 3)
+            self.grip_pos[i] = d.sensordata[_GRIP_POS].reshape(2, 3)
+        self.foot_vel[ids] = 0.0
+        self.palm_touch[ids] = 0.0
 
     def _push(self):
         """Random horizontal shove so the policy learns to recover its balance."""
