@@ -34,7 +34,7 @@ def make_env(task, **kwargs):
     if task == "sort":
         from env_sort import SortEnv
         kwargs.pop("flat_only", None)
-        return SortEnv(guide=SortCfg.guide_start, **kwargs)
+        return SortEnv(guide=SortCfg.guide_start, mass_level=SortCfg.mass_start, **kwargs)
     raise ValueError(f"unknown task '{task}' (hike or sort)")
 
 
@@ -62,7 +62,7 @@ def make_env(task, **kwargs):
     if task == "sort":
         from env_sort import SortEnv
         kwargs.pop("flat_only", None)
-        return SortEnv(guide=SortCfg.guide_start, **kwargs)
+        return SortEnv(guide=SortCfg.guide_start, mass_level=SortCfg.mass_start, **kwargs)
     raise ValueError(f"unknown task '{task}' (hike or sort)")
 
 

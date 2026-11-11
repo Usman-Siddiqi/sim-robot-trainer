@@ -279,8 +279,12 @@ class SortCfg:
 
     # boxes: depth, width (between the palms), height [m]; the robot weighs 28.5 kg
     box_sizes = [[0.20, 0.26, 0.20], [0.18, 0.24, 0.18], [0.22, 0.28, 0.22], [0.20, 0.24, 0.16], [0.18, 0.28, 0.22]]
-    box_mass = [1.5, 6.0]           # [kg]
-    num_box_masses = 6              # different masses within that range
+    box_mass = [0.5, 6.0]           # [kg]
+    num_box_masses = 12             # different masses within that range
+    # Training starts with the lightest boxes only; a heavier one is added whenever the robots get most
+    # boxes off the table (mean furthest stage per episode >= mass_threshold).
+    mass_start = 3                  # number of box masses at the start (0.5, 1.0, 1.5 kg)
+    mass_threshold = 1.7
     num_robot_variants = 8          # robot / floor physics variants (domain randomisation)
     box_friction = 1.0
     # Contact model. With MuJoCo's default (pyramidal, soft) friction a squeezed box creeps out of the
@@ -337,7 +341,7 @@ class SortCfg:
         "box_shove": -2.0,          # box pushed around / tipped over on the pickup table
         "arm_pos": 0.0,
         "sorted": 250.0,            # one-off bonus per box sorted (scaled by dt like the rest)
-        "failed": -150.0,           # one-off: box dropped on the floor or put on the wrong table
+        "failed": -100.0,           # one-off: box dropped on the floor or put on the wrong table (a new box appears)
     }
 
 

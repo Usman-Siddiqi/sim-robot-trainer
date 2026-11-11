@@ -93,14 +93,16 @@ class Scene:
         self.obs, _, done, info = env.step(actions.cpu().numpy())
         event = None
         if env.task == "sort":
-            if int(env.sorted_count[0]) > self._count:
+            if info["sorted"][0]:
                 self.sorted_boxes.append(self._box)
                 event = f"box {len(self.sorted_boxes)} sorted"
+            elif info["dropped"][0]:
+                event = "dropped the box"
+            elif info["wrong_table"][0]:
+                event = "wrong table"
         if done[0]:
             if info["fell"][0]:
-                event = "left the trail" if info.get("off_trail", [False])[0] else \
-                    "dropped the box" if info.get("dropped", [False])[0] else \
-                    "wrong table" if info.get("wrong_table", [False])[0] else "fell"
+                event = "left the trail" if info.get("off_trail", [False])[0] else "fell"
             elif info.get("reached_goal", [False])[0]:
                 event = "reached the end of the trail"
             else:
@@ -326,21 +328,19 @@ def _sort_episodes(policy, env, device):
     obs = env.reset()
     n = env.num_envs
     running = np.ones(n, dtype=bool)
-    out = {"sorted": np.zeros(n), "fell": np.zeros(n, dtype=bool), "dropped": np.zeros(n, dtype=bool),
-           "wrong": np.zeros(n, dtype=bool), "first_mass": env.box_masses[env.box_mass_index].copy(),
-           "first_sorted": np.zeros(n, dtype=bool), "first_time": np.full(n, np.nan)}
+    out = {"sorted": np.zeros(n), "dropped": np.zeros(n), "wrong": np.zeros(n), "fell": np.zeros(n, dtype=bool),
+           "first_mass": env.box_masses[env.box_mass_index].copy(), "first_sorted": np.zeros(n, dtype=bool),
+           "first_done": np.zeros(n, dtype=bool), "first_time": np.full(n, np.nan)}
     for step in range(env.max_episode_length + 1):
-        before = env.sorted_count.copy()
         obs, _, done, info = env.step(_act(policy, obs, device))
-        gained = running & ((env.sorted_count > before) | (done & env.just_sorted))
-        first = gained & ~out["first_sorted"]
+        first = running & info["sorted"] & ~out["first_done"]
         out["first_time"][first] = (step + 1) * env.dt
-        out["first_sorted"] |= gained
-        out["sorted"] += gained
-        ended = running & done
-        out["dropped"] |= ended & info["dropped"]
-        out["wrong"] |= ended & info["wrong_table"]
-        out["fell"] |= ended & info["fell"] & ~info["dropped"] & ~info["wrong_table"]
+        out["first_sorted"] |= first
+        out["first_done"] |= running & (info["sorted"] | info["dropped"] | info["wrong_table"])
+        out["sorted"] += running & info["sorted"]
+        out["dropped"] += running & info["dropped"]
+        out["wrong"] += running & info["wrong_table"]
+        out["fell"] |= running & done & info["fell"]
         running &= ~done
         if not running.any():
             break
@@ -348,8 +348,8 @@ def _sort_episodes(policy, env, device):
 
 
 def _sort_summary(r):
-    return {"boxes": float(r["sorted"].mean()), "any": float((r["sorted"] > 0).mean()),
-            "fell": float(r["fell"].mean()), "dropped": float(r["dropped"].mean()), "wrong": float(r["wrong"].mean())}
+    return {"boxes": float(r["sorted"].mean()), "any": float((r["sorted"] > 0).mean()), "fell": float(r["fell"].mean()),
+            "dropped": float(r["dropped"].mean()), "wrong": float(r["wrong"].mean())}
 
 
 def evaluate_sort(policy, device, num_envs=1000, num_threads=None, seed=123, suite="all", verbose=True):
@@ -358,9 +358,9 @@ def evaluate_sort(policy, device, num_envs=1000, num_threads=None, seed=123, sui
     common = dict(num_envs=num_envs, num_threads=num_threads, seed=seed)
     results = {}
     row = lambda name, s: (f"  {name:<44}{s['boxes']:>7.2f}{s['any']:>12.0%}{s['fell']:>8.0%}"
-                           f"{s['dropped']:>9.0%}{s['wrong']:>8.0%}")
-    header = (f"  {'':<44}{'boxes':>7}{'>= 1 box':>12}{'fell':>8}{'dropped':>9}{'wrong':>8}\n"
-              f"  {'':<44}{'/ 30 s':>7}{'sorted':>12}{'':>8}{'box':>9}{'table':>8}")
+                           f"{s['dropped']:>9.2f}{s['wrong']:>8.2f}")
+    header = (f"  {'':<44}{'boxes':>7}{'>= 1 box':>12}{'robot':>8}{'boxes':>9}{'wrong':>8}\n"
+              f"  {'':<44}{'sorted':>7}{'sorted':>12}{'fell':>8}{'dropped':>9}{'table':>8}      (per 30 s episode)")
     if suite in ("trained", "all"):
         env = SortEnv(randomize=False, **common)
         r = _sort_episodes(policy, env, device)

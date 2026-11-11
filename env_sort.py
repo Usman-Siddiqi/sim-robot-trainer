@@ -16,8 +16,8 @@ its joints and has to squeeze harder and lean back further for the heavy ones.
 
 The finished policy is told nothing about where to go: it sees the colour of
 the box and where the red, the green and the blue table are, and works out the
-rest. Dropping the box, putting it on the wrong table or falling ends the
-episode.
+rest. A box that is dropped or put on the wrong table costs a penalty and is
+replaced by a new one; falling over ends the episode.
 
 Training starts from the hiking policy, so the robot can already walk wherever
 a velocity command sends it. At first a guide supplies such commands (to the
@@ -99,16 +99,18 @@ class SortEnv(RobotEnv):
     episode_length_s = SortCfg.episode_length_s
     default_arm_pos = RobotCfg.carry_arm_pos
     progress_keys = (("sorted", "sorted"), ("stage", "stage"), ("drop", "dropped"), ("wrong", "wrong_table"),
-                     ("guided", "guided"))
+                     ("guided", "guided"), ("kg", "max_box_mass"))
 
     def __init__(self, num_envs, num_threads=None, seed=0, randomize=True, physics=None, push=None,
-                 box_mass=None, start_near=None, guide=0.0):
+                 box_mass=None, start_near=None, guide=0.0, mass_level=None):
         """
         Args (see RobotEnv for the rest):
             box_mass: (lowest, highest) box mass [kg] instead of SortCfg.box_mass
             start_near: share of episodes starting in front of the pickup table instead of SortCfg.start_near
             guide: share of robots that get velocity commands from the guide (0 = the policy is on its
                    own, which is how a finished policy is used; training starts at SortCfg.guide_start)
+            mass_level: only the lightest `mass_level` box masses are used (default: all; training
+                        starts at SortCfg.mass_start)
         """
         super().__init__(num_envs, num_threads, seed, randomize, physics, push)
         cfg = SortCfg
@@ -121,6 +123,7 @@ class SortEnv(RobotEnv):
         self.box_half_of_scene = np.array(cfg.box_sizes) / 2
         lo, hi = box_mass or cfg.box_mass
         self.box_masses = np.linspace(lo, hi, cfg.num_box_masses)
+        self.mass_level = int(np.clip(mass_level or cfg.num_box_masses, 1, cfg.num_box_masses))
         if physics:
             robots = [dict(physics)]
         elif randomize:
@@ -161,6 +164,8 @@ class SortEnv(RobotEnv):
         self.placed_steps = np.zeros(n, dtype=np.int64)
         self.wrong_steps = np.zeros(n, dtype=np.int64)
         self.just_sorted = np.zeros(n, dtype=bool)
+        self.drop_count = np.zeros(n)
+        self.wrong_count = np.zeros(n)
         self.squeeze = np.zeros(n)                              # force both of two opposite box faces feel [N]
         self.table_force = np.zeros(n)                          # force on the bottom of the box [N]
         self.commands = np.zeros((n, 3))                        # forward speed, sideways speed, yaw rate
@@ -190,7 +195,7 @@ class SortEnv(RobotEnv):
         """Put a fresh box (random colour, weight and size) on the pickup table of the given robots."""
         cfg, rng, n = SortCfg, self.rng, ids.size
         self.env_scene[ids] = rng.integers(0, len(self.scene_models), n)
-        self.box_mass_index[ids] = rng.integers(0, self.box_masses.size, n)
+        self.box_mass_index[ids] = rng.integers(0, self.mass_level, n)
         self.env_variant[ids] = self.robot_variant[ids] * self.box_masses.size + self.box_mass_index[ids]
         self._assign_models(ids)
         self.box_half[ids] = self.box_half_of_scene[self.env_scene[ids]]
@@ -224,6 +229,8 @@ class SortEnv(RobotEnv):
         if cfg.shuffle_colors:
             self.table_color[ids] = np.argsort(rng.random((n, 3)), axis=1)
         self.sorted_count[ids] = 0
+        self.drop_count[ids] = 0
+        self.wrong_count[ids] = 0
         self.max_stage[ids] = 0
         self.guided[ids] = rng.random(n) < self.guide_probability
         self._new_box(ids)
@@ -262,7 +269,7 @@ class SortEnv(RobotEnv):
         self.grip_dist = np.stack([
             np.linalg.norm(self.grip_pos[:, 0] - (self.box_pos + left * reach[:, None]), axis=1),
             np.linalg.norm(self.grip_pos[:, 1] - (self.box_pos - left * reach[:, None]), axis=1)], axis=1)
-        gripped = (self.squeeze > cfg.grip_force) & (self.grip_dist < 0.08).all(axis=1)
+        gripped = (self.squeeze > cfg.grip_force) & (self.grip_dist < 0.12).all(axis=1)
 
         # the box relative to the tables
         half_up = np.abs(bx[:, 2]) * hx + np.abs(by[:, 2]) * hy + np.abs(bz[:, 2]) * hz
@@ -344,15 +351,20 @@ class SortEnv(RobotEnv):
         self.wrong_steps = np.where(self.on_wrong & ~self.gripped, self.wrong_steps + 1, 0)
         wrong = self.wrong_steps >= int(cfg.place_hold_s / self.dt)
         dropped = self.dropped & ~fell
-        self.failed = (dropped | wrong) & ~fell
+        wrong &= ~dropped & ~fell
+        self.failed = dropped | wrong
+        self.just_sorted &= ~fell & ~self.failed
+        self.drop_count += dropped
+        self.wrong_count += wrong
 
-        ids = np.nonzero(self.just_sorted & ~fell & ~self.failed)[0]
+        # a sorted, dropped or misplaced box is replaced by a new one on the pickup table
         self.reward_count = self.sorted_count.copy()            # the reward of this step still sees the old box
+        self.sorted_count += self.just_sorted
+        ids = np.nonzero(self.just_sorted | self.failed)[0]
         if ids.size:
-            self.sorted_count[ids] += 1
             self._new_box(ids)
         time_out = self.episode_length >= self.max_episode_length
-        return fell | self.failed, time_out, {"dropped": dropped, "wrong_table": wrong & ~dropped}
+        return fell, time_out, {"dropped": dropped, "wrong_table": wrong, "sorted": self.just_sorted.copy()}
 
     def _task_terms(self, fell):
         cmd, sigma = self.commands, RewardCfg.tracking_sigma
@@ -366,7 +378,7 @@ class SortEnv(RobotEnv):
             "heading": 0.5 * (1.0 + np.cos(self.face_err)),
             "box_vel": (rel_vel ** 2).sum(axis=1) * self.gripped,
             "box_shove": self.box_shove,
-            "sorted": (self.just_sorted & ~fell & ~self.failed).astype(np.float64),
+            "sorted": self.just_sorted.astype(np.float64),
             "failed": self.failed.astype(np.float64),
         }
 
@@ -406,16 +418,20 @@ class SortEnv(RobotEnv):
 
     # ---------------------------------------------------------- guidance
     def curriculum_state(self):
-        return {"guide": self.guide_probability}
+        return {"guide": self.guide_probability, "mass_level": self.mass_level}
 
     def load_curriculum(self, state, rng):
         self.guide_probability = float(state.get("guide", self.guide_probability))
+        self.mass_level = int(state.get("mass_level", self.mass_level))
 
     def on_iteration(self, iteration, stats):
-        """Withdraw the guide a little whenever the robots sort well enough."""
+        """Add a heavier box / withdraw the guide a little whenever the robots do well enough."""
         cfg = SortCfg
-        if (iteration % cfg.guide_every == 0 and self.guide_probability > 0.0
-                and stats.get("sorted", 0.0) >= cfg.guide_threshold):
+        if iteration % cfg.guide_every:
+            return
+        if self.mass_level < self.box_masses.size and stats.get("stage", 0.0) >= cfg.mass_threshold:
+            self.mass_level += 1
+        elif self.guide_probability > 0.0 and stats.get("sorted", 0.0) >= cfg.guide_threshold:
             self.guide_probability = max(0.0, round(self.guide_probability - cfg.guide_step, 4))
 
     def _episode_stats(self, ids, info):
@@ -423,8 +439,9 @@ class SortEnv(RobotEnv):
         stats["guided"] = self.guide_probability
         stats["sorted"] = float(self.sorted_count[ids].mean())
         stats["stage"] = float(self.max_stage[ids].mean())
-        stats["dropped"] = float(info["dropped"][ids].mean())
-        stats["wrong_table"] = float(info["wrong_table"][ids].mean())
+        stats["dropped"] = float(self.drop_count[ids].mean())
+        stats["wrong_table"] = float(self.wrong_count[ids].mean())
+        stats["max_box_mass"] = float(self.box_masses[self.mass_level - 1])
         return stats
 
 
