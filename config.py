@@ -128,7 +128,8 @@ class HikeCfg:
     max_back_speed = 0.3            # [m/s]
     max_yaw_rate = 1.0              # [rad/s]
     heading_gain = 1.5              # yaw rate command = gain * heading error
-    min_turn_speed = 0.3            # share of the speed that is kept while facing the wrong way
+    min_turn_speed = 0.6            # share of the speed that is kept while facing the wrong way
+                                    # (much less and standing still is the lazy answer to a big turn)
     resample_time_s = 5.0           # on flat ground: new command this often
     stand_probability = 0.1         # on flat ground: share of commands that are "stand still"
     velocity_mode = 0.5             # on flat ground: share of random velocity commands
@@ -223,6 +224,7 @@ class ObsCfg:
 class RewardCfg:
     """Reward = sum(weight * term) * control_dt. See RobotEnv._common_terms and the task classes."""
     tracking_sigma = 0.25
+    tracking_sigma_yaw = 0.5        # wider: a robot that cannot turn yet still feels which way is better
     swing_height_target = 0.09      # desired foot clearance above the terrain during swing [m]
     min_feet_distance = 0.14        # feet closer than this (sideways) are penalised [m]
     soft_joint_limit = 0.9          # fraction of the joint range that is penalty free
@@ -249,7 +251,8 @@ class RewardCfg:
     }
     hike = {
         "tracking_lin_vel": 1.5,    # follow the commanded velocity
-        "tracking_ang_vel": 0.75,   # follow the commanded yaw rate (heading)
+        "tracking_ang_vel": 0.75,   # follow the commanded yaw rate
+        "heading": 0.5,             # face along the trail (or the commanded direction)
         "arm_pos": -0.05,           # arms far from the relaxed pose (they are free to swing for balance)
     }
 
@@ -327,6 +330,7 @@ class SortCfg:
         "stage": 1.0,
         "tracking_lin_vel": 1.0,    # walking where it should (see "Guidance": the robot may not be told)
         "tracking_ang_vel": 0.5,
+        "heading": 0.3,             # facing where it is going / the table it is at
         "box_vel": -0.5,            # held box moving relative to the torso
         "arm_pos": 0.0,
         "sorted": 250.0,            # one-off bonus per box sorted (scaled by dt like the rest)

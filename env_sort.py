@@ -302,6 +302,7 @@ class SortEnv(RobotEnv):
         self.commands[:, 1] = np.clip(side, -cfg.max_side_speed, cfg.max_side_speed)
         face_err = wrap_to_pi(np.where(far, travel, table) - self.yaw)
         self.commands[:, 2] = np.clip(cfg.heading_gain * face_err, -cfg.max_yaw_rate, cfg.max_yaw_rate)
+        self.face_err = face_err
         self.commands[np.abs(self.commands) < 0.03] = 0.0
         self.standing = (np.abs(self.commands) < GaitCfg.stand_speed).all(axis=1)
         self.stand_dist = dist
@@ -337,7 +338,8 @@ class SortEnv(RobotEnv):
             "stage": NUM_STAGES * self.reward_count + self.stage + self.stage_progress,
             # the reward always knows where the robot should walk, whether the robot was told or not
             "tracking_lin_vel": np.exp(-lin_err / sigma),
-            "tracking_ang_vel": np.exp(-(cmd[:, 2] - self.base_ang_vel[:, 2]) ** 2 / sigma),
+            "tracking_ang_vel": np.exp(-(cmd[:, 2] - self.base_ang_vel[:, 2]) ** 2 / RewardCfg.tracking_sigma_yaw),
+            "heading": 0.5 * (1.0 + np.cos(self.face_err)),
             "box_vel": (rel_vel ** 2).sum(axis=1) * self.gripped,
             "sorted": (self.just_sorted & ~fell & ~self.failed).astype(np.float64),
             "failed": self.failed.astype(np.float64),

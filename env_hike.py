@@ -149,6 +149,7 @@ class HikeEnv(RobotEnv):
         self.commands[:, 1] = np.clip(self.speed * np.sin(err) * np.maximum(ahead, 0.0), -cfg.max_side_speed, cfg.max_side_speed)
         self.commands[:, 2] = np.clip(cfg.heading_gain * err, -cfg.max_yaw_rate, cfg.max_yaw_rate) * (self.speed > 0)
         self.commands[self.velocity_mode] = self.velocity_cmd[self.velocity_mode]
+        self.heading_err = err * ~self.velocity_mode * (self.speed > 0)
         self.standing = (np.abs(self.commands) < GaitCfg.stand_speed).all(axis=1)
         self.progress = np.clip((x - cfg.start_x) / (cfg.goal_x - cfg.start_x), 0.0, 1.0)
 
@@ -199,7 +200,8 @@ class HikeEnv(RobotEnv):
         lin_err = (cmd[:, 0] - self.base_lin_vel[:, 0]) ** 2 + (cmd[:, 1] - self.base_lin_vel[:, 1]) ** 2
         return {
             "tracking_lin_vel": np.exp(-lin_err / sigma),
-            "tracking_ang_vel": np.exp(-(cmd[:, 2] - self.base_ang_vel[:, 2]) ** 2 / sigma),
+            "tracking_ang_vel": np.exp(-(cmd[:, 2] - self.base_ang_vel[:, 2]) ** 2 / RewardCfg.tracking_sigma_yaw),
+            "heading": 0.5 * (1.0 + np.cos(self.heading_err)),
         }
 
     def _compute_obs(self):
