@@ -82,7 +82,7 @@ def build_scene(box_size):
     # one on the bottom tells how much of the box's weight still rests on the table.
     for name, pos, size in [("box_yp", [0, hy, 0.01], [hx, 0.012, hz - 0.01]), ("box_yn", [0, -hy, 0.01], [hx, 0.012, hz - 0.01]),
                             ("box_xp", [hx, 0, 0.01], [0.012, hy, hz - 0.01]), ("box_xn", [-hx, 0, 0.01], [0.012, hy, hz - 0.01]),
-                            ("box_bottom", [0, 0, -hz], [hx, hy, 0.008])]:       # how hard the box presses on the table
+                            ("box_bottom", [0, 0, -hz], [hx + 0.01, hy + 0.01, 0.015])]:     # weight on the table
         box.add_site(name=name, type=mujoco.mjtGeom.mjGEOM_BOX, pos=pos, size=size, rgba=[0, 0, 0, 0])
         spec.add_sensor(name=name, type=mujoco.mjtSensor.mjSENS_TOUCH, objtype=mujoco.mjtObj.mjOBJ_SITE, objname=name)
     for palm in ("l_palm", "r_palm"):
@@ -293,7 +293,7 @@ class SortEnv(RobotEnv):
         fetch_stand = self.box_pos[:, 0:2] - self.table_dir[0] * cfg.stand_off
         fetch_dist = np.linalg.norm(fetch_stand - self.base_pos[:, 0:2], axis=1)
         stage = np.zeros(n, dtype=np.int64)
-        progress = 0.4 * np.exp(-fetch_dist / 0.5) + 0.4 * np.exp(-self.grip_dist.sum(axis=1) / 0.25) \
+        progress = 0.3 * np.exp(-fetch_dist / 0.5) + 0.5 * np.exp(-self.grip_dist.sum(axis=1) / 0.2) \
             + 0.2 * np.clip(self.squeeze / cfg.grip_force, 0.0, 1.0)
         lifting = gripped & over_pickup & (self.box_above < cfg.lift_height)
         stage[lifting] = 1
@@ -356,6 +356,7 @@ class SortEnv(RobotEnv):
         self.just_sorted &= ~fell & ~self.failed
         self.drop_count += dropped
         self.wrong_count += wrong
+        self.box_lost, self.misplaced = dropped, wrong
 
         # a sorted, dropped or misplaced box is replaced by a new one on the pickup table
         self.reward_count = self.sorted_count.copy()            # the reward of this step still sees the old box
@@ -379,7 +380,8 @@ class SortEnv(RobotEnv):
             "box_vel": (rel_vel ** 2).sum(axis=1) * self.gripped,
             "box_shove": self.box_shove,
             "sorted": self.just_sorted.astype(np.float64),
-            "failed": self.failed.astype(np.float64),
+            "wrong_table": self.misplaced.astype(np.float64),
+            "dropped": self.box_lost.astype(np.float64),
         }
 
     def _heading_frame(self, v):

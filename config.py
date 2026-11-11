@@ -303,7 +303,7 @@ class SortCfg:
     place_margin = 0.07             # a placed box must be at least this far inside the table edge [m]
     place_hold_s = 0.3              # ... lie still for this long
     release_distance = 0.05         # ... with both palms at least this far from it [m]
-    start_near = 0.5                # share of episodes that start in front of the pickup table (the rest: anywhere)
+    start_near = 0.7                # share of episodes that start in front of the pickup table (the rest: anywhere)
 
     # walking between the tables
     speed = 0.5                     # [m/s]
@@ -341,7 +341,9 @@ class SortCfg:
         "box_shove": -2.0,          # box pushed around / tipped over on the pickup table
         "arm_pos": 0.0,
         "sorted": 250.0,            # one-off bonus per box sorted (scaled by dt like the rest)
-        "failed": -100.0,           # one-off: box dropped on the floor or put on the wrong table (a new box appears)
+        "wrong_table": -100.0,      # one-off: box put on the wrong table (a new box appears)
+        "dropped": 0.0,             # one-off: box dropped on the floor. No penalty: losing the progress made with
+                                    # that box costs enough, and a penalty teaches the robot to keep its hands off
     }
 
 
