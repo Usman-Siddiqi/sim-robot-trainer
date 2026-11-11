@@ -289,6 +289,9 @@ class RobotEnv:
     def load_curriculum(self, state, rng):
         pass
 
+    def on_iteration(self, iteration, stats):
+        """Called by the training loop after every iteration with the running episode statistics."""
+
     def model_of(self, index):
         """The MjModel robot `index` is currently simulated with (use it for rendering)."""
         return self._models[index]

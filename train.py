@@ -22,8 +22,8 @@ from datetime import datetime
 import numpy as np
 import torch
 
-from agent import PPO, ActorCritic, get_device, load_policy, print_device_info, save_checkpoint
-from config import LOG_PATH, MODEL_SAVE_PATH, PPOCfg
+from agent import PPO, ActorCritic, get_device, load_policy, print_device_info, save_checkpoint, transfer_policy
+from config import LOG_PATH, MODEL_SAVE_PATH, PPOCfg, RobotCfg, SortCfg
 
 
 def make_env(task, **kwargs):
@@ -34,7 +34,7 @@ def make_env(task, **kwargs):
     if task == "sort":
         from env_sort import SortEnv
         kwargs.pop("flat_only", None)
-        return SortEnv(**kwargs)
+        return SortEnv(guide=SortCfg.guide_start, **kwargs)
     raise ValueError(f"unknown task '{task}' (hike or sort)")
 
 
@@ -62,7 +62,7 @@ def make_env(task, **kwargs):
     if task == "sort":
         from env_sort import SortEnv
         kwargs.pop("flat_only", None)
-        return SortEnv(**kwargs)
+        return SortEnv(guide=SortCfg.guide_start, **kwargs)
     raise ValueError(f"unknown task '{task}' (hike or sort)")
 
 
@@ -80,7 +80,7 @@ def find_latest_model(models_dir=MODEL_SAVE_PATH):
 
 def train(task="hike", num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_iterations, flat_only=False,
           device="auto", num_threads=None, resume=None, run_name=None, seed=0,
-          save_path=MODEL_SAVE_PATH, log_path=LOG_PATH):
+          save_path=MODEL_SAVE_PATH, log_path=LOG_PATH, init_from=None):
     """
     Train the robot.
 
@@ -92,6 +92,7 @@ def train(task="hike", num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_itera
         device: "auto", "cuda" or "cpu" for the neural networks
         num_threads: physics threads (default: all logical cores)
         resume: checkpoint to continue from
+        init_from: sort only: hiking policy to start from (the sorting robot already knows how to walk)
         run_name: name of the run directory (default: timestamp)
     Returns:
         path of the final checkpoint
@@ -119,7 +120,14 @@ def train(task="hike", num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_itera
           f"| {env.num_threads} physics threads | obs {env.num_obs}, actions {env.num_actions}")
 
     start_iteration = 0
-    if resume:
+    warmup = 0
+    if init_from and not resume:
+        policy, _ = transfer_policy(init_from, env.num_obs, env.num_actions, device,
+                                    arm_slice=slice(RobotCfg.num_leg_joints, None), arm_std=PPOCfg.transfer_arm_std)
+        ppo = PPO(policy, num_envs, device)
+        warmup = PPOCfg.critic_warmup
+        print(f"Starting from the policy {init_from}")
+    elif resume:
         policy, ckpt = load_policy(resume, device)
         if policy.num_obs != env.num_obs or policy.num_actions != env.num_actions:
             raise ValueError(f"{resume} does not fit the '{task}' task (it was trained for '{ckpt.get('task', '?')}')")
@@ -181,6 +189,7 @@ def train(task="hike", num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_itera
             t1 = time.time()
 
             # -------------------------------------------------------- learn
+            ppo.train_actor = iteration - start_iteration > warmup
             losses = ppo.update(obs)
             t2 = time.time()
 
@@ -191,6 +200,7 @@ def train(task="hike", num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_itera
             mean_return = float(np.mean(return_history)) if return_history else 0.0
             mean_length = float(np.mean(length_history)) if length_history else 0.0
             means = {k: float(np.mean(v)) for k, v in episode_stats.items()}
+            env.on_iteration(iteration, means)
             if writer:
                 step = iteration
                 writer.add_scalar("train/mean_return", mean_return, step)

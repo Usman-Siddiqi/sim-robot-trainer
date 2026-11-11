@@ -49,14 +49,18 @@ class RunningNorm(nn.Module):
         self.register_buffer("mean", torch.zeros(size))
         self.register_buffer("var", torch.ones(size))
         self.register_buffer("count", torch.tensor(1e-4))
+        # entries taken over from another policy keep the statistics that policy was trained with
+        self.register_buffer("frozen", torch.zeros(size, dtype=torch.bool))
 
     @torch.no_grad()
     def update(self, x):
         batch_mean, batch_var, n = x.mean(dim=0), x.var(dim=0, unbiased=False), x.shape[0]
         total = self.count + n
         delta = batch_mean - self.mean
-        self.mean += delta * n / total
-        self.var.copy_((self.var * self.count + batch_var * n + delta ** 2 * self.count * n / total) / total)
+        mean = self.mean + delta * n / total
+        var = (self.var * self.count + batch_var * n + delta ** 2 * self.count * n / total) / total
+        self.mean.copy_(torch.where(self.frozen, self.mean, mean))
+        self.var.copy_(torch.where(self.frozen, self.var, var))
         self.count.copy_(total)
 
     def forward(self, x):
@@ -110,6 +114,7 @@ class PPO:
         self.cfg = cfg
         self.lr = cfg.learning_rate
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.lr)
+        self.train_actor = True             # False: only the value function learns (warm-up after a transfer)
 
         T, N, A, O = cfg.num_steps, num_envs, policy.num_actions, policy.num_obs
         self.obs = torch.zeros(T, N, O, device=device)
@@ -190,7 +195,7 @@ class PPO:
                 with torch.no_grad():
                     kl = (torch.log(std / old_stds[idx])
                           + (old_stds[idx] ** 2 + (old_means[idx] - mean) ** 2) / (2.0 * std ** 2) - 0.5).sum(dim=-1).mean()
-                    if cfg.desired_kl is not None:
+                    if cfg.desired_kl is not None and self.train_actor:
                         if kl > cfg.desired_kl * 2.0:
                             self.lr = max(1e-5, self.lr / 1.5)
                         elif 0.0 < kl < cfg.desired_kl / 2.0:
@@ -204,7 +209,9 @@ class PPO:
                                        torch.clamp(ratio, 1.0 - cfg.clip_param, 1.0 + cfg.clip_param) * adv).mean()
                 value_clipped = old_values[idx] + (value - old_values[idx]).clamp(-cfg.clip_param, cfg.clip_param)
                 value_loss = torch.max((value - returns[idx]) ** 2, (value_clipped - returns[idx]) ** 2).mean()
-                loss = surrogate + cfg.value_loss_coef * value_loss - cfg.entropy_coef * entropy
+                loss = cfg.value_loss_coef * value_loss
+                if self.train_actor:
+                    loss = loss + surrogate - cfg.entropy_coef * entropy
 
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -245,5 +252,36 @@ def load_policy(path, device):
     """Load a checkpoint. Returns (policy, checkpoint dict)."""
     data = torch.load(path, map_location=device, weights_only=True)
     policy = ActorCritic(data["num_obs"], data["num_actions"], data["actor_hidden"], data["critic_hidden"])
-    policy.load_state_dict(data["policy"])
+    state = dict(data["policy"])
+    state.setdefault("normalizer.frozen", torch.zeros(data["num_obs"], dtype=torch.bool))
+    policy.load_state_dict(state)
     return policy.to(device), data
+
+
+def transfer_policy(path, num_obs, num_actions, device, arm_slice=None, arm_std=None):
+    """
+    Start a new policy from one trained on another task whose observation is the first part of
+    the new one (the sorting observation starts with the hiking observation).
+
+    The actor is copied; the weights of the extra inputs start at zero, so at first the new policy
+    behaves exactly like the old one. The value function starts from scratch (the rewards differ).
+    """
+    old, data = load_policy(path, device)
+    if old.num_actions != num_actions or old.num_obs > num_obs:
+        raise ValueError(f"{path} cannot be used as a starting point for this task")
+    policy = ActorCritic(num_obs, num_actions, old.actor_hidden, data["critic_hidden"]).to(device)
+    k = old.num_obs
+    with torch.no_grad():
+        state = old.actor.state_dict()
+        first = policy.actor[0].weight
+        first.zero_()
+        first[:, :k] = state.pop("0.weight")
+        policy.actor[0].bias.copy_(state.pop("0.bias"))
+        policy.actor.load_state_dict(state, strict=False)
+        policy.log_std.copy_(old.log_std)
+        if arm_slice is not None and arm_std is not None:
+            policy.log_std[arm_slice] = torch.clamp(policy.log_std[arm_slice], min=float(torch.tensor(arm_std).log()))
+        policy.normalizer.mean[:k] = old.normalizer.mean
+        policy.normalizer.var[:k] = old.normalizer.var
+        policy.normalizer.frozen[:k] = True
+    return policy, data

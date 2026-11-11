@@ -70,7 +70,8 @@ class HikeEnv(RobotEnv):
         self.commands = np.zeros((n, 3))                    # forward speed, sideways speed, yaw rate
         self.speed = np.zeros(n)
         self.move_dir = np.zeros(n)                         # flat ground: direction to walk in ...
-        self.face_dir = np.zeros(n)                         # ... and direction to face
+        self.velocity_mode = np.zeros(n, dtype=bool)        # flat ground: random velocity command instead
+        self.velocity_cmd = np.zeros((n, 3))
         self.progress = np.zeros(n)
 
         # observation
@@ -105,7 +106,7 @@ class HikeEnv(RobotEnv):
         z = terrain.height(tile, x, y) + RobotCfg.init_height
         self._robot_reset_state(ids, x, y, z, yaw)
         self.move_dir[ids] = yaw
-        self.face_dir[ids] = yaw
+        self.velocity_mode[ids] = False
         self._sample_commands(ids)
 
     def _sample_commands(self, ids):
@@ -118,9 +119,14 @@ class HikeEnv(RobotEnv):
             self.speed[ids[stand]] = 0.0
         if self.resample_commands:
             flat = ids[self.is_flat[ids]]
-            self.move_dir[flat] = rng.uniform(-np.pi, np.pi, flat.size)
-            crab = rng.uniform(-cfg.crab_angle, cfg.crab_angle, flat.size) * (rng.random(flat.size) < 0.5)
-            self.face_dir[flat] = self.move_dir[flat] + crab
+            k = flat.size
+            self.move_dir[flat] = rng.uniform(-np.pi, np.pi, k)
+            # random velocity commands; each component is switched off now and then (pure turning, pure sideways, ...)
+            self.velocity_mode[flat] = (rng.random(k) < cfg.velocity_mode) & (self.speed[flat] > 0)
+            cmd = np.stack([rng.uniform(-cfg.max_back_speed, cfg.speed[1], k),
+                            rng.uniform(-cfg.max_side_speed, cfg.max_side_speed, k),
+                            rng.uniform(-cfg.max_yaw_rate, cfg.max_yaw_rate, k)], axis=1)
+            self.velocity_cmd[flat] = cmd * (rng.random((k, 3)) > 0.25)
 
     def _update_task(self):
         """Navigation layer: where the trail goes -> velocity command."""
@@ -136,13 +142,14 @@ class HikeEnv(RobotEnv):
         to_x = terrain.path_x[look] - x
         to_y = terrain.path_y[tile, look] - y
         trail_dir = np.where(to_x > 0.05, np.arctan2(to_y, np.maximum(to_x, 1e-6)), 0.0)
-        move = np.where(self.is_flat, self.move_dir, trail_dir)
-        face = np.where(self.is_flat, self.face_dir, trail_dir)
-        err = wrap_to_pi(move - self.yaw)
-        self.commands[:, 0] = np.clip(self.speed * np.cos(err), 0.0, None)
-        self.commands[:, 1] = np.clip(self.speed * np.sin(err), -cfg.max_side_speed, cfg.max_side_speed)
-        self.commands[:, 2] = np.clip(cfg.heading_gain * wrap_to_pi(face - self.yaw), -cfg.max_yaw_rate, cfg.max_yaw_rate)
-        self.standing = self.speed < GaitCfg.stand_speed
+        err = wrap_to_pi(np.where(self.is_flat, self.move_dir, trail_dir) - self.yaw)
+        # keep walking while turning (an arc), drift sideways a little to get onto the line faster
+        ahead = np.cos(err)
+        self.commands[:, 0] = self.speed * np.maximum(ahead, cfg.min_turn_speed)
+        self.commands[:, 1] = np.clip(self.speed * np.sin(err) * np.maximum(ahead, 0.0), -cfg.max_side_speed, cfg.max_side_speed)
+        self.commands[:, 2] = np.clip(cfg.heading_gain * err, -cfg.max_yaw_rate, cfg.max_yaw_rate) * (self.speed > 0)
+        self.commands[self.velocity_mode] = self.velocity_cmd[self.velocity_mode]
+        self.standing = (np.abs(self.commands) < GaitCfg.stand_speed).all(axis=1)
         self.progress = np.clip((x - cfg.start_x) / (cfg.goal_x - cfg.start_x), 0.0, 1.0)
 
     def _check_termination(self):

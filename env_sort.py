@@ -14,21 +14,28 @@ and then the next box appears. Boxes weigh 1.5 - 6 kg (the robot: 28.5 kg) and
 come in several sizes. The robot is not told the weight; it feels it through
 its joints and has to squeeze harder and lean back further for the heavy ones.
 
-Nothing tells the policy where to go: it sees the colour of the box and where
-the red, the green and the blue table are, and has to work out the rest.
-Dropping the box, putting it on the wrong table or falling ends the episode.
+The finished policy is told nothing about where to go: it sees the colour of
+the box and where the red, the green and the blue table are, and works out the
+rest. Dropping the box, putting it on the wrong table or falling ends the
+episode.
 
-Observation (106): base velocity, angular velocity, gravity direction, joint
-positions / velocities, previous action, gait clock (71), then - all relative to
-the torso, in its heading frame - the box (position, orientation, velocity,
-size, colour), the palms (position, contact force), the pickup table and the
-three coloured tables, and how many boxes were already sorted.
+Training starts from the hiking policy, so the robot can already walk wherever
+a velocity command sends it. At first a guide supplies such commands (to the
+box, then to the right table); it is withdrawn step by step as the robot gets
+better - see "Guidance" in SortCfg.
+
+Observation (253): the hiking observation (base velocity, angular velocity,
+gravity direction, joint positions / velocities, previous action, gait clock,
+velocity command - all zero for robots without a guide - and height scan), then,
+relative to the torso in its heading frame: the box (position, orientation,
+velocity, size, colour), the palms (position, contact force), the pickup table
+and the three coloured tables, and how many boxes were already sorted.
 """
 
 import mujoco
 import numpy as np
 
-from config import DomainRandCfg, ObsCfg, RewardCfg, RobotCfg, SimCfg, SortCfg
+from config import DomainRandCfg, GaitCfg, HikeCfg, ObsCfg, RewardCfg, RobotCfg, SimCfg, SortCfg
 from env_base import RobotEnv, quat_rotate_inverse, wrap_to_pi
 
 NUM_STAGES = 5
@@ -69,6 +76,10 @@ def build_scene(box_size):
     box.add_freejoint()
     box.add_geom(name="box", type=mujoco.mjtGeom.mjGEOM_BOX, size=[s / 2 for s in box_size], mass=3.0,
                  contype=1, conaffinity=1, condim=4, friction=[cfg.box_friction, 0.02, 0.0001], rgba=[0.8, 0.2, 0.2, 1])
+    for palm in ("l_palm", "r_palm"):
+        mu = cfg.palm_friction
+        spec.add_pair(geomname1=palm, geomname2="box", condim=4, friction=[mu, mu, 0.02, 0.0001, 0.0001],
+                      solreffriction=cfg.palm_solreffriction, solimp=cfg.palm_solimp)
     model = spec.compile()
     model.opt.timestep = SimCfg.timestep
     return model
@@ -78,19 +89,23 @@ class SortEnv(RobotEnv):
     task = "sort"
     episode_length_s = SortCfg.episode_length_s
     default_arm_pos = RobotCfg.carry_arm_pos
-    progress_keys = (("sorted", "sorted"), ("stage", "stage"), ("drop", "dropped"), ("wrong", "wrong_table"))
+    progress_keys = (("sorted", "sorted"), ("stage", "stage"), ("drop", "dropped"), ("wrong", "wrong_table"),
+                     ("guided", "guided"))
 
     def __init__(self, num_envs, num_threads=None, seed=0, randomize=True, physics=None, push=None,
-                 box_mass=None, start_near=None):
+                 box_mass=None, start_near=None, guide=0.0):
         """
         Args (see RobotEnv for the rest):
             box_mass: (lowest, highest) box mass [kg] instead of SortCfg.box_mass
             start_near: share of episodes starting in front of the pickup table instead of SortCfg.start_near
+            guide: share of robots that get velocity commands from the guide (0 = the policy is on its
+                   own, which is how a finished policy is used; training starts at SortCfg.guide_start)
         """
         super().__init__(num_envs, num_threads, seed, randomize, physics, push)
         cfg = SortCfg
         n = self.num_envs
         self.start_near = cfg.start_near if start_near is None else start_near
+        self.guide_probability = float(guide)
 
         # ---- scenes = box sizes; variants = robot physics x box mass
         scenes = [build_scene(size) for size in cfg.box_sizes]
@@ -137,10 +152,14 @@ class SortEnv(RobotEnv):
         self.placed_steps = np.zeros(n, dtype=np.int64)
         self.wrong_steps = np.zeros(n, dtype=np.int64)
         self.just_sorted = np.zeros(n, dtype=bool)
+        self.commands = np.zeros((n, 3))                        # forward speed, sideways speed, yaw rate
+        self.guided = np.zeros(n, dtype=bool)
 
-        self.num_obs = 71 + 3 + 6 + 3 + 3 + 3 + 6 + 2 + 2 + 6 + 1
+        self.num_scan = len(HikeCfg.scan_x) * len(HikeCfg.scan_y)
+        self.num_obs = 71 + 3 + self.num_scan + (3 + 6 + 3 + 3 + 3 + 6 + 2 + 2 + 6 + 1)
         noise = DomainRandCfg.noise_object_pos
         self._noise_scale = np.concatenate(self._proprioception_noise() + [
+            np.zeros(3), np.full(self.num_scan, DomainRandCfg.noise_height_scan * ObsCfg.height_scale),
             np.full(3, noise), np.full(6, 0.02), np.full(3, 0.05), np.full(3, 0.005), np.zeros(3),
             np.full(6, noise), np.zeros(2), np.full(2, noise), np.full(6, noise), np.zeros(1),
         ]).astype(np.float32)
@@ -193,6 +212,7 @@ class SortEnv(RobotEnv):
             self.table_color[ids] = np.argsort(rng.random((n, 3)), axis=1)
         self.sorted_count[ids] = 0
         self.max_stage[ids] = 0
+        self.guided[ids] = rng.random(n) < self.guide_probability
         self._new_box(ids)
 
         # the robot: in front of the pickup table, or anywhere in the middle of the room
@@ -263,15 +283,28 @@ class SortEnv(RobotEnv):
         self.stage, self.stage_progress = stage, progress
         self.max_stage = np.maximum(self.max_stage, stage)
 
-        # ---- where to stand / walk to, and whether to walk at all
+        # ---- the guide: velocity command towards where the robot should stand
         goal_dir = np.where((stage < 2)[:, None], self.table_dir[0], self.table_dir[self.target])
         stand = np.where((stage < 2)[:, None], fetch_stand, self.place_xy[self.target] - goal_dir * cfg.stand_off)
         to_stand = stand - self.base_pos[:, 0:2]
-        self.stand_dist = np.linalg.norm(to_stand, axis=1)
-        self.stand_dir = to_stand / np.maximum(self.stand_dist, 1e-6)[:, None]
-        self.standing = self.stand_dist < cfg.stand_radius
-        look_at = np.where((stage < 2)[:, None], self.box_pos[:, 0:2], self.place_xy[self.target])
-        self.face_err = wrap_to_pi(np.arctan2(look_at[:, 1] - self.base_pos[:, 1], look_at[:, 0] - self.base_pos[:, 0]) - self.yaw)
+        dist = np.linalg.norm(to_stand, axis=1)
+        speed = np.clip(cfg.approach_gain * dist, 0.0, cfg.speed)
+        speed[dist < 0.03] = 0.0
+        travel = np.arctan2(to_stand[:, 1], to_stand[:, 0])
+        table = np.arctan2(goal_dir[:, 1], goal_dir[:, 0])
+        err = wrap_to_pi(travel - self.yaw)
+        ahead = np.cos(err)
+        far = dist > 0.5
+        # far away: walk there in an arc, like on a trail. Close: face the table and shuffle into place.
+        self.commands[:, 0] = np.where(far, speed * np.maximum(ahead, HikeCfg.min_turn_speed),
+                                       np.clip(speed * ahead, -cfg.max_back_speed, None))
+        side = speed * np.sin(err) * np.where(far, np.maximum(ahead, 0.0), 1.0)
+        self.commands[:, 1] = np.clip(side, -cfg.max_side_speed, cfg.max_side_speed)
+        face_err = wrap_to_pi(np.where(far, travel, table) - self.yaw)
+        self.commands[:, 2] = np.clip(cfg.heading_gain * face_err, -cfg.max_yaw_rate, cfg.max_yaw_rate)
+        self.commands[np.abs(self.commands) < 0.03] = 0.0
+        self.standing = (np.abs(self.commands) < GaitCfg.stand_speed).all(axis=1)
+        self.stand_dist = dist
         self.gripped = gripped
 
     def _check_termination(self):
@@ -297,16 +330,15 @@ class SortEnv(RobotEnv):
         return fell | self.failed, time_out, {"dropped": dropped, "wrong_table": wrong & ~dropped}
 
     def _task_terms(self, fell):
-        cfg = SortCfg
-        toward = (self.base_lin_vel_world[:, 0:2] * self.stand_dir).sum(axis=1)
-        speed_sq = (self.base_lin_vel_world[:, 0:2] ** 2).sum(axis=1)
+        cmd, sigma = self.commands, RewardCfg.tracking_sigma
+        lin_err = (cmd[:, 0] - self.base_lin_vel[:, 0]) ** 2 + (cmd[:, 1] - self.base_lin_vel[:, 1]) ** 2
         rel_vel = self.box_vel - self.base_lin_vel_world
         return {
             "stage": NUM_STAGES * self.reward_count + self.stage + self.stage_progress,
-            "approach": np.where(self.standing, 1.0, np.clip(toward / cfg.speed, -1.0, 1.0)),
-            "face": 0.5 * (1.0 + np.cos(self.face_err)),
+            # the reward always knows where the robot should walk, whether the robot was told or not
+            "tracking_lin_vel": np.exp(-lin_err / sigma),
+            "tracking_ang_vel": np.exp(-(cmd[:, 2] - self.base_ang_vel[:, 2]) ** 2 / sigma),
             "box_vel": (rel_vel ** 2).sum(axis=1) * self.gripped,
-            "stand_still": speed_sq * self.standing,
             "sorted": (self.just_sorted & ~fell & ~self.failed).astype(np.float64),
             "failed": self.failed.astype(np.float64),
         }
@@ -329,7 +361,10 @@ class SortEnv(RobotEnv):
         # tables listed by colour: first the red one, then green, then blue
         order = 1 + np.argsort(self.table_color, axis=1)
         tables = [self._heading_frame(self.table_xy[order[:, k]] - base[:, 0:2]) for k in range(3)]
+        scan = np.repeat(base[:, 2:3] - RobotCfg.nominal_height, self.num_scan, axis=1)     # the floor is flat
         return self._finish_obs(self._proprioception() + [
+            self.commands * self.guided[:, None],
+            np.clip(scan, -1.0, 1.0) * ObsCfg.height_scale,
             self._heading_frame(box_pos - base),
             self._heading_frame(bx), self._heading_frame(by),
             self._heading_frame(box_vel - self.base_lin_vel_world),
@@ -342,8 +377,23 @@ class SortEnv(RobotEnv):
             np.clip(self.sorted_count[:, None] / 4.0, 0.0, 2.0),
         ])
 
+    # ---------------------------------------------------------- guidance
+    def curriculum_state(self):
+        return {"guide": self.guide_probability}
+
+    def load_curriculum(self, state, rng):
+        self.guide_probability = float(state.get("guide", self.guide_probability))
+
+    def on_iteration(self, iteration, stats):
+        """Withdraw the guide a little whenever the robots sort well enough."""
+        cfg = SortCfg
+        if (iteration % cfg.guide_every == 0 and self.guide_probability > 0.0
+                and stats.get("sorted", 0.0) >= cfg.guide_threshold):
+            self.guide_probability = max(0.0, round(self.guide_probability - cfg.guide_step, 4))
+
     def _episode_stats(self, ids, info):
         stats = super()._episode_stats(ids, info)
+        stats["guided"] = self.guide_probability
         stats["sorted"] = float(self.sorted_count[ids].mean())
         stats["stage"] = float(self.max_stage[ids].mean())
         stats["dropped"] = float(info["dropped"][ids].mean())
@@ -355,7 +405,7 @@ class SortEnv(RobotEnv):
 if __name__ == "__main__":
     import time
 
-    env = SortEnv(num_envs=1024)
+    env = SortEnv(num_envs=1024, guide=1.0)
     obs = env.reset()
     print(f"obs {obs.shape}, actions {env.num_actions}, threads {env.num_threads}, "
           f"models {sum(len(v) for v in env.variants)}, geoms {env.scene_models[0].ngeom}")

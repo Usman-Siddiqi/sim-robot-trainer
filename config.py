@@ -106,11 +106,11 @@ class HikeCfg:
     boulder_clearance = (0.7, 0.42) # free space between the trail centre and a boulder [m]
 
     rows = [
-        dict(name="flat", kind="flat", weight=0.10),
-        dict(name="rocky", kind="trail", weight=0.15, sections=["rough", "steps", "flat"]),
-        dict(name="climb", kind="trail", weight=0.15, sections=["steps_up", "steps_up", "steps_down", "steps_down", "flat"]),
-        dict(name="stones", kind="trail", weight=0.15, sections=["stones", "stones", "flat", "rough"]),
-        dict(name="ridge", kind="trail", weight=0.15, sections=["ridge", "boulders", "ridge", "rough"]),
+        dict(name="flat", kind="flat", weight=0.20),
+        dict(name="rocky", kind="trail", weight=0.125, sections=["rough", "steps", "flat"]),
+        dict(name="climb", kind="trail", weight=0.125, sections=["steps_up", "steps_up", "steps_down", "steps_down", "flat"]),
+        dict(name="stones", kind="trail", weight=0.125, sections=["stones", "stones", "flat", "rough"]),
+        dict(name="ridge", kind="trail", weight=0.125, sections=["ridge", "boulders", "ridge", "rough"]),
         # the real thing: everything mixed (two rows, so there are twice as many different trails)
         dict(name="trail", kind="trail", weight=0.15,
              sections=["rough", "steps", "steps_up", "steps_down", "stones", "ridge", "boulders"]),
@@ -119,14 +119,19 @@ class HikeCfg:
     ]
     flat_rows = [dict(name="flat", kind="flat", weight=1.0)]
 
-    # commands
+    # Commands. On a trail the robot is steered towards the trail ahead: it keeps walking and turns
+    # in an arc. On flat ground half of the robots practise exactly that with random directions, the
+    # other half gets random velocity commands (forwards / backwards, sideways, turning on the spot),
+    # so the policy can move in any direction - the sorting task builds on that.
     speed = [0.4, 0.9]              # commanded walking speed [m/s]
     max_side_speed = 0.3            # [m/s]
+    max_back_speed = 0.3            # [m/s]
     max_yaw_rate = 1.0              # [rad/s]
     heading_gain = 1.5              # yaw rate command = gain * heading error
-    resample_time_s = 5.0           # on flat ground: new speed / direction this often
+    min_turn_speed = 0.3            # share of the speed that is kept while facing the wrong way
+    resample_time_s = 5.0           # on flat ground: new command this often
     stand_probability = 0.1         # on flat ground: share of commands that are "stand still"
-    crab_angle = 0.5                # on flat ground: walk up to this far off the facing direction [rad]
+    velocity_mode = 0.5             # on flat ground: share of random velocity commands
 
     # Height scan: terrain height sampled on a grid around the robot (in its heading frame)
     scan_x = [-0.30 + 0.09 * i for i in range(16)]      # -0.30 .. 1.05 m
@@ -275,19 +280,41 @@ class SortCfg:
     num_box_masses = 6              # different masses within that range
     num_robot_variants = 8          # robot / floor physics variants (domain randomisation)
     box_friction = 1.0
-    # contact model: friction grasps need the exact (elliptic) friction cone and a stiff friction constraint,
-    # or the box slowly creeps out of the hands
+    # Contact model. With MuJoCo's default (pyramidal, soft) friction a squeezed box creeps out of the
+    # hands within seconds. So: the exact elliptic friction cone everywhere, and a stiff, grippy
+    # contact between the palms and the box. (A high global impratio would also stop the creep,
+    # but it changes how the feet grip the floor and the hiking policy starts to stumble.)
     elliptic_cone = True
-    impratio = 4.0
+    impratio = 2.0
+    palm_friction = 1.6
+    palm_solreffriction = [0.01, 1.0]
+    palm_solimp = [0.98, 0.99, 0.001, 0.5, 2.0]
 
     stand_off = 0.34                # torso <-> box distance for picking up / putting down [m]
     lift_height = 0.08              # a box counts as picked up when it is this far above the table [m]
     place_margin = 0.07             # a placed box must be at least this far inside the table edge [m]
     place_hold_s = 0.3              # ... lie still for this long
     release_distance = 0.05         # ... with both palms at least this far from it [m]
-    speed = 0.5                     # walking speed the reward asks for [m/s]
-    stand_radius = 0.2              # closer than this to where it should stand, the robot stops stepping [m]
     start_near = 0.5                # share of episodes that start in front of the pickup table (the rest: anywhere)
+
+    # walking between the tables
+    speed = 0.5                     # [m/s]
+    approach_gain = 1.5             # slows down on arrival: speed = gain * distance [1/s]
+    max_side_speed = 0.3
+    max_back_speed = 0.2
+    max_yaw_rate = 1.0
+    heading_gain = 1.5
+
+    # Guidance. The sorting policy starts as a copy of the hiking policy, which walks wherever a
+    # velocity command tells it to. At first a "guide" (a few lines of code that know the rules)
+    # gives it such commands: to the box, then to the table of the box's colour. As soon as the
+    # robot sorts boxes that way, the guide is taken away from more and more robots, which then
+    # only see the colour of the box and where the three coloured tables are - until no robot
+    # is guided any more and the policy does the sorting by itself.
+    guide_start = 1.0               # share of guided robots at the start of training
+    guide_step = 0.05               # ... is reduced by this much
+    guide_every = 10                # ... every so many iterations
+    guide_threshold = 1.0           # ... while robots sort at least this many boxes per episode on average
 
     # The task reward is a progress score:  5 * boxes sorted + stage + progress within the stage (0..1)
     #   stage 0  fetch    walk to the box, palms to its two sides
@@ -298,10 +325,9 @@ class SortCfg:
     # Finishing a stage is always worth more than lingering in it.
     rewards = {
         "stage": 1.0,
-        "approach": 0.5,            # speed towards where it should stand (helps to discover walking)
-        "face": 0.3,                # facing the table it is dealing with
+        "tracking_lin_vel": 1.0,    # walking where it should (see "Guidance": the robot may not be told)
+        "tracking_ang_vel": 0.5,
         "box_vel": -0.5,            # held box moving relative to the torso
-        "stand_still": -1.0,        # drifting when it should stand
         "arm_pos": 0.0,
         "sorted": 250.0,            # one-off bonus per box sorted (scaled by dt like the rest)
         "failed": -150.0,           # one-off: box dropped on the floor or put on the wrong table
@@ -330,6 +356,10 @@ class PPOCfg:
     learning_rate = 1.0e-3
     desired_kl = 0.01               # learning rate is adapted to keep the policy change near this
     max_grad_norm = 1.0
+
+    # starting from another policy (sorting starts from the hiking policy)
+    critic_warmup = 20              # iterations in which only the value function learns
+    transfer_arm_std = 0.6          # exploration noise of the arm joints after the transfer
 
     # bookkeeping
     save_interval = 100             # iterations between checkpoints
