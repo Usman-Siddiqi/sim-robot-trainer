@@ -293,7 +293,7 @@ class SortCfg:
     palm_solreffriction = [0.01, 1.0]
     palm_solimp = [0.98, 0.99, 0.001, 0.5, 2.0]
 
-    stand_off = 0.34                # torso <-> box distance for picking up / putting down [m]
+    stand_off = 0.37                # torso <-> box distance for picking up / putting down [m]
     grip_force = 3.0                # a box counts as gripped when two opposite faces each feel this force [N]
     lift_height = 0.08              # a box counts as picked up when it is this far above the table [m]
     place_margin = 0.07             # a placed box must be at least this far inside the table edge [m]
@@ -322,7 +322,8 @@ class SortCfg:
 
     # The task reward is a progress score:  5 * boxes sorted + stage + progress within the stage (0..1)
     #   stage 0  fetch    walk to the box, palms to its two sides
-    #   stage 1  lift     squeeze and lift it off the table
+    #   stage 1  lift     squeeze and lift it off the table (progress: share of its weight the hands carry,
+    #                     then height)
     #   stage 2  carry    carry it to the table of its colour
     #   stage 3  lower    lower it onto that table
     #   stage 4  release  let go
@@ -333,6 +334,7 @@ class SortCfg:
         "tracking_ang_vel": 0.5,
         "heading": 0.3,             # facing where it is going / the table it is at
         "box_vel": -0.5,            # held box moving relative to the torso
+        "box_shove": -2.0,          # box pushed around / tipped over on the pickup table
         "arm_pos": 0.0,
         "sorted": 250.0,            # one-off bonus per box sorted (scaled by dt like the rest)
         "failed": -150.0,           # one-off: box dropped on the floor or put on the wrong table
@@ -354,7 +356,8 @@ class PPOCfg:
     gamma = 0.99
     lam = 0.95
     clip_param = 0.2
-    entropy_coef = 0.005
+    entropy_coef = 0.002
+    max_noise_std = 1.0             # exploration noise per joint is kept below this
     value_loss_coef = 1.0
     num_epochs = 5
     num_minibatches = 4

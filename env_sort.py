@@ -78,9 +78,11 @@ def build_scene(box_size):
     box.add_geom(name="box", type=mujoco.mjtGeom.mjGEOM_BOX, size=[hx, hy, hz], mass=3.0,
                  contype=1, conaffinity=1, condim=4, friction=[cfg.box_friction, 0.02, 0.0001], rgba=[0.8, 0.2, 0.2, 1])
     # Pressure sensors on the four side faces of the box: only a box squeezed from two opposite sides
-    # counts as gripped. (The slabs end 2 cm above the bottom edge, so the table is not felt.)
+    # counts as gripped. (The slabs end 2 cm above the bottom edge, so the table is not felt.) A fifth
+    # one on the bottom tells how much of the box's weight still rests on the table.
     for name, pos, size in [("box_yp", [0, hy, 0.01], [hx, 0.012, hz - 0.01]), ("box_yn", [0, -hy, 0.01], [hx, 0.012, hz - 0.01]),
-                            ("box_xp", [hx, 0, 0.01], [0.012, hy, hz - 0.01]), ("box_xn", [-hx, 0, 0.01], [0.012, hy, hz - 0.01])]:
+                            ("box_xp", [hx, 0, 0.01], [0.012, hy, hz - 0.01]), ("box_xn", [-hx, 0, 0.01], [0.012, hy, hz - 0.01]),
+                            ("box_bottom", [0, 0, -hz], [hx, hy, 0.008])]:       # how hard the box presses on the table
         box.add_site(name=name, type=mujoco.mjtGeom.mjGEOM_BOX, pos=pos, size=size, rgba=[0, 0, 0, 0])
         spec.add_sensor(name=name, type=mujoco.mjtSensor.mjSENS_TOUCH, objtype=mujoco.mjtObj.mjOBJ_SITE, objname=name)
     for palm in ("l_palm", "r_palm"):
@@ -160,6 +162,7 @@ class SortEnv(RobotEnv):
         self.wrong_steps = np.zeros(n, dtype=np.int64)
         self.just_sorted = np.zeros(n, dtype=bool)
         self.squeeze = np.zeros(n)                              # force both of two opposite box faces feel [N]
+        self.table_force = np.zeros(n)                          # force on the bottom of the box [N]
         self.commands = np.zeros((n, 3))                        # forward speed, sideways speed, yaw rate
         self.guided = np.zeros(n, dtype=bool)
 
@@ -202,6 +205,7 @@ class SortEnv(RobotEnv):
         self.state[ids, self._box_qpos] = qpos
         self.state[ids, self._box_qvel] = 0.0
         self.squeeze[ids] = 0.0
+        self.table_force[ids] = 9.81 * self.box_masses[self.box_mass_index[ids]]
         self.placed_steps[ids] = 0
         self.wrong_steps[ids] = 0
 
@@ -236,8 +240,9 @@ class SortEnv(RobotEnv):
         self._robot_reset_state(ids, x, y, RobotCfg.init_height, yaw)
 
     def _read_task_sensors(self, sensors):
-        face = sensors.mean(axis=1)                             # (N, 4): +y, -y, +x, -x face of the box
+        face = sensors.mean(axis=1)                             # (N, 5): +y, -y, +x, -x face and bottom of the box
         self.squeeze = np.maximum(np.minimum(face[:, 0], face[:, 1]), np.minimum(face[:, 2], face[:, 3]))
+        self.table_force = face[:, 4]
 
     def _update_task(self):
         """Work out, from the physical state alone, which stage every robot is in and how far along."""
@@ -257,7 +262,7 @@ class SortEnv(RobotEnv):
         self.grip_dist = np.stack([
             np.linalg.norm(self.grip_pos[:, 0] - (self.box_pos + left * reach[:, None]), axis=1),
             np.linalg.norm(self.grip_pos[:, 1] - (self.box_pos - left * reach[:, None]), axis=1)], axis=1)
-        gripped = self.squeeze > cfg.grip_force
+        gripped = (self.squeeze > cfg.grip_force) & (self.grip_dist < 0.08).all(axis=1)
 
         # the box relative to the tables
         half_up = np.abs(bx[:, 2]) * hx + np.abs(by[:, 2]) * hy + np.abs(bz[:, 2]) * hz
@@ -285,7 +290,10 @@ class SortEnv(RobotEnv):
             + 0.2 * np.clip(self.squeeze / cfg.grip_force, 0.0, 1.0)
         lifting = gripped & over_pickup & (self.box_above < cfg.lift_height)
         stage[lifting] = 1
-        progress[lifting] = np.clip(self.box_above[lifting] / cfg.lift_height, 0.0, 1.0)
+        # before the box leaves the table: the share of its weight the hands already carry
+        weight = 9.81 * self.box_masses[self.box_mass_index]
+        carried = np.clip(1.0 - self.table_force / weight, 0.0, 1.0)
+        progress[lifting] = 0.5 * carried[lifting] + 0.5 * np.clip(self.box_above[lifting] / cfg.lift_height, 0.0, 1.0)
         carrying = gripped & ~lifting & ~over_target
         stage[carrying] = 2
         progress[carrying] = 1.0 - np.clip(place_dist[carrying] / 2.6, 0.0, 1.0)
@@ -321,6 +329,8 @@ class SortEnv(RobotEnv):
         self.standing = (np.abs(self.commands) < GaitCfg.stand_speed).all(axis=1)
         self.stand_dist = dist
         self.gripped = gripped
+        # a box still lying on the pickup table should not be shoved around or tipped over
+        self.box_shove = (stage == 0) * ((self.box_vel[:, 0:2] ** 2).sum(axis=1) + 4.0 * (1.0 - np.abs(bz[:, 2])))
 
     def _check_termination(self):
         cfg = SortCfg
@@ -355,6 +365,7 @@ class SortEnv(RobotEnv):
             "tracking_ang_vel": np.exp(-(cmd[:, 2] - self.base_ang_vel[:, 2]) ** 2 / RewardCfg.tracking_sigma_yaw),
             "heading": 0.5 * (1.0 + np.cos(self.face_err)),
             "box_vel": (rel_vel ** 2).sum(axis=1) * self.gripped,
+            "box_shove": self.box_shove,
             "sorted": (self.just_sorted & ~fell & ~self.failed).astype(np.float64),
             "failed": self.failed.astype(np.float64),
         }
