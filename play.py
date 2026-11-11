@@ -120,12 +120,16 @@ class Scene:
 
     def draw_extras(self, scn):
         """Add the boxes that were already sorted to a scene (they are not simulated any more)."""
+        rim, thick = SortCfg.rim_width, SortCfg.rim_thickness
         for pos, mat, size, rgb in self.sorted_boxes:
-            if scn.ngeom >= scn.maxgeom:
-                break
-            mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_BOX, size, pos, mat,
-                                np.array([*rgb, 1.0], dtype=np.float32))
-            scn.ngeom += 1
+            up = mat.reshape(3, 3)[:, 2]
+            for centre, half, colour in [(pos, size, rgb),
+                                         (pos + up * (size[2] - thick / 2), size + [rim, rim, thick / 2 - size[2]], 0.8 * rgb)]:
+                if scn.ngeom >= scn.maxgeom:
+                    return
+                mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_BOX, np.asarray(half, dtype=np.float64),
+                                    np.asarray(centre, dtype=np.float64), mat, np.array([*colour, 1.0], dtype=np.float32))
+                scn.ngeom += 1
 
 
 # ------------------------------------------------------------------ viewer

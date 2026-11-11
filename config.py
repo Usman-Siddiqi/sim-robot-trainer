@@ -260,11 +260,12 @@ class RewardCfg:
 # ======================================================================== SORT
 class SortCfg:
     """
-    Task 2: sorting. A box appears on the pickup table. The robot walks up to it,
-    squeezes it between its palms, lifts it, carries it to the table whose colour
-    matches the box, puts it down there and lets go. Then the next box appears.
-    Boxes differ in weight (and size) and the robot is not told the weight: it
-    has to squeeze harder and lean back further for the heavy ones.
+    Task 2: sorting. A crate appears on the pickup table. The robot walks up to
+    it, puts its palms against the two sides - under the rim that runs around the
+    top of every crate -, lifts it, carries it to the table whose colour matches
+    the crate, puts it down there and lets go. Then the next crate appears.
+    Crates differ in weight (and size) and the robot is not told the weight: it
+    has to hold them up and lean back against the load by feel.
     """
     episode_length_s = 30.0
     colors = [("red", (0.86, 0.22, 0.20)), ("green", (0.22, 0.66, 0.30)), ("blue", (0.20, 0.42, 0.90))]
@@ -287,6 +288,8 @@ class SortCfg:
     mass_threshold = 1.7
     num_robot_variants = 8          # robot / floor physics variants (domain randomisation)
     box_friction = 1.0
+    rim_width = 0.06                # the rim sticks out this far beyond the sides [m]
+    rim_thickness = 0.02
     # Contact model. With MuJoCo's default (pyramidal, soft) friction a squeezed box creeps out of the
     # hands within seconds. So: the exact elliptic friction cone everywhere, and a stiff, grippy
     # contact between the palms and the box. (A high global impratio would also stop the creep,
@@ -298,11 +301,11 @@ class SortCfg:
     palm_solimp = [0.98, 0.99, 0.001, 0.5, 2.0]
 
     stand_off = 0.37                # torso <-> box distance for picking up / putting down [m]
-    grip_force = 3.0                # a box counts as gripped when two opposite faces each feel this force [N]
+    grip_distance = 0.09            # a box counts as gripped while both palms are this close to their place on its sides [m]
     lift_height = 0.08              # a box counts as picked up when it is this far above the table [m]
     place_margin = 0.07             # a placed box must be at least this far inside the table edge [m]
     place_hold_s = 0.3              # ... lie still for this long
-    release_distance = 0.05         # ... with both palms at least this far from it [m]
+    release_distance = 0.14         # ... with both palms at least this far from their place on its sides [m]
     start_near = 0.7                # share of episodes that start in front of the pickup table (the rest: anywhere)
 
     # walking between the tables
@@ -325,9 +328,8 @@ class SortCfg:
     guide_threshold = 1.0           # ... while robots sort at least this many boxes per episode on average
 
     # The task reward is a progress score:  5 * boxes sorted + stage + progress within the stage (0..1)
-    #   stage 0  fetch    walk to the box, palms to its two sides
-    #   stage 1  lift     squeeze and lift it off the table (progress: share of its weight the hands carry,
-    #                     then height)
+    #   stage 0  fetch    walk to the box, palms to its two sides (just under the rim)
+    #   stage 1  lift     lift it off the table (progress: share of its weight the hands carry, then height)
     #   stage 2  carry    carry it to the table of its colour
     #   stage 3  lower    lower it onto that table
     #   stage 4  release  let go

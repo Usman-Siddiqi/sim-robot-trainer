@@ -7,12 +7,13 @@ Task 2 - sorting boxes by colour. The room has a pickup table and three
 drop-off tables (red, green, blue - which is which changes every episode). A
 box of one of the three colours lies on the pickup table. The robot has to
 
-    walk to it -> squeeze it between its palms -> lift it -> carry it to the
-    table of the same colour -> put it down -> let go
+    walk to it -> palms against its sides, under the rim -> lift it -> carry it
+    to the table of the same colour -> put it down -> let go
 
-and then the next box appears. Boxes weigh 1.5 - 6 kg (the robot: 28.5 kg) and
-come in several sizes. The robot is not told the weight; it feels it through
-its joints and has to squeeze harder and lean back further for the heavy ones.
+and then the next box appears. The boxes are crates with a rim around the top
+that rests on the palms. They weigh 0.5 - 6 kg (the robot: 28.5 kg) and come in
+several sizes. The robot is not told the weight; it feels it through its joints
+and has to hold on and lean back further for the heavy ones.
 
 The finished policy is told nothing about where to go: it sees the colour of
 the box and where the red, the green and the blue table are, and works out the
@@ -24,11 +25,11 @@ a velocity command sends it. At first a guide supplies such commands (to the
 box, then to the right table); it is withdrawn step by step as the robot gets
 better - see "Guidance" in SortCfg.
 
-Observation (254): the hiking observation (base velocity, angular velocity,
+Observation (253): the hiking observation (base velocity, angular velocity,
 gravity direction, joint positions / velocities, previous action, gait clock,
 velocity command - all zero for robots without a guide - and height scan), then,
 relative to the torso in its heading frame: the box (position, orientation,
-velocity, size, colour, how hard it is squeezed), the palms (position, contact force), the pickup table
+velocity, size, colour), the palms (position, contact force), the pickup table
 and the three coloured tables, and how many boxes were already sorted.
 """
 
@@ -77,14 +78,13 @@ def build_scene(box_size):
     hx, hy, hz = [s / 2 for s in box_size]
     box.add_geom(name="box", type=mujoco.mjtGeom.mjGEOM_BOX, size=[hx, hy, hz], mass=3.0,
                  contype=1, conaffinity=1, condim=4, friction=[cfg.box_friction, 0.02, 0.0001], rgba=[0.8, 0.2, 0.2, 1])
-    # Pressure sensors on the four side faces of the box: only a box squeezed from two opposite sides
-    # counts as gripped. (The slabs end 2 cm above the bottom edge, so the table is not felt.) A fifth
-    # one on the bottom tells how much of the box's weight still rests on the table.
-    for name, pos, size in [("box_yp", [0, hy, 0.01], [hx, 0.012, hz - 0.01]), ("box_yn", [0, -hy, 0.01], [hx, 0.012, hz - 0.01]),
-                            ("box_xp", [hx, 0, 0.01], [0.012, hy, hz - 0.01]), ("box_xn", [-hx, 0, 0.01], [0.012, hy, hz - 0.01]),
-                            ("box_bottom", [0, 0, -hz], [hx + 0.01, hy + 0.01, 0.015])]:     # weight on the table
-        box.add_site(name=name, type=mujoco.mjtGeom.mjGEOM_BOX, pos=pos, size=size, rgba=[0, 0, 0, 0])
-        spec.add_sensor(name=name, type=mujoco.mjtSensor.mjSENS_TOUCH, objtype=mujoco.mjtObj.mjOBJ_SITE, objname=name)
+    # the rim: a lid that is a little wider than the box; it rests on the palms when the box is carried
+    rim, thick = cfg.rim_width, cfg.rim_thickness
+    box.add_geom(name="box_rim", type=mujoco.mjtGeom.mjGEOM_BOX, pos=[0, 0, hz - thick / 2], size=[hx + rim, hy + rim, thick / 2],
+                 mass=0.1, contype=1, conaffinity=1, condim=4, friction=[cfg.box_friction, 0.02, 0.0001], rgba=[0.7, 0.18, 0.18, 1])
+    # pressure sensor under the box: how much of its weight still rests on a table
+    box.add_site(name="box_bottom", type=mujoco.mjtGeom.mjGEOM_BOX, pos=[0, 0, -hz], size=[hx + 0.01, hy + 0.01, 0.015], rgba=[0, 0, 0, 0])
+    spec.add_sensor(name="box_bottom", type=mujoco.mjtSensor.mjSENS_TOUCH, objtype=mujoco.mjtObj.mjOBJ_SITE, objname="box_bottom")
     for palm in ("l_palm", "r_palm"):
         mu = cfg.palm_friction
         spec.add_pair(geomname1=palm, geomname2="box", condim=4, friction=[mu, mu, 0.02, 0.0001, 0.0001],
@@ -136,6 +136,7 @@ class SortEnv(RobotEnv):
         self._init_sim(scenes, variants=variants)
         m = scenes[0]
         self._box_geom = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, "box")
+        self._rim_geom = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, "box_rim")
         self._table_geoms = [[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, f"table{k}_{part}") for part in ("top", "mat")]
                              for k in range(4)]
         nu = self.num_actions
@@ -166,18 +167,17 @@ class SortEnv(RobotEnv):
         self.just_sorted = np.zeros(n, dtype=bool)
         self.drop_count = np.zeros(n)
         self.wrong_count = np.zeros(n)
-        self.squeeze = np.zeros(n)                              # force both of two opposite box faces feel [N]
         self.table_force = np.zeros(n)                          # force on the bottom of the box [N]
         self.commands = np.zeros((n, 3))                        # forward speed, sideways speed, yaw rate
         self.guided = np.zeros(n, dtype=bool)
 
         self.num_scan = len(HikeCfg.scan_x) * len(HikeCfg.scan_y)
-        self.num_obs = 71 + 3 + self.num_scan + (3 + 6 + 3 + 3 + 3 + 6 + 2 + 1 + 2 + 6 + 1)
+        self.num_obs = 71 + 3 + self.num_scan + (3 + 6 + 3 + 3 + 3 + 6 + 2 + 2 + 6 + 1)
         noise = DomainRandCfg.noise_object_pos
         self._noise_scale = np.concatenate(self._proprioception_noise() + [
             np.zeros(3), np.full(self.num_scan, DomainRandCfg.noise_height_scan * ObsCfg.height_scale),
             np.full(3, noise), np.full(6, 0.02), np.full(3, 0.05), np.full(3, 0.005), np.zeros(3),
-            np.full(6, noise), np.zeros(3), np.full(2, noise), np.full(6, noise), np.zeros(1),
+            np.full(6, noise), np.zeros(2), np.full(2, noise), np.full(6, noise), np.zeros(1),
         ]).astype(np.float32)
         weights = {**RewardCfg.common, **cfg.rewards}
         self._init_rewards(weights)
@@ -209,7 +209,6 @@ class SortEnv(RobotEnv):
         qpos[:, 3], qpos[:, 6] = np.cos(yaw / 2), np.sin(yaw / 2)
         self.state[ids, self._box_qpos] = qpos
         self.state[ids, self._box_qvel] = 0.0
-        self.squeeze[ids] = 0.0
         self.table_force[ids] = 9.81 * self.box_masses[self.box_mass_index[ids]]
         self.placed_steps[ids] = 0
         self.wrong_steps[ids] = 0
@@ -218,6 +217,7 @@ class SortEnv(RobotEnv):
         """Copy the state of robot `index` into an MjData and colour its box and tables (for rendering)."""
         model = self._models[index]
         model.geom_rgba[self._box_geom, :3] = self.colors[self.box_color[index]]
+        model.geom_rgba[self._rim_geom, :3] = 0.8 * self.colors[self.box_color[index]]
         for k in range(1, 4):
             for g in self._table_geoms[k]:
                 model.geom_rgba[g, :3] = self.colors[self.table_color[index, k - 1]]
@@ -247,9 +247,7 @@ class SortEnv(RobotEnv):
         self._robot_reset_state(ids, x, y, RobotCfg.init_height, yaw)
 
     def _read_task_sensors(self, sensors):
-        face = sensors.mean(axis=1)                             # (N, 5): +y, -y, +x, -x face and bottom of the box
-        self.squeeze = np.maximum(np.minimum(face[:, 0], face[:, 1]), np.minimum(face[:, 2], face[:, 3]))
-        self.table_force = face[:, 4]
+        self.table_force = sensors.mean(axis=1)[:, 0]
 
     def _update_task(self):
         """Work out, from the physical state alone, which stage every robot is in and how far along."""
@@ -263,13 +261,15 @@ class SortEnv(RobotEnv):
         self.box_axes = (bx, by)
         hx, hy, hz = self.box_half.T
 
-        # where the palms belong: the two faces of the box that point left / right as seen by the robot
+        # where the palms belong: on the two faces of the box that point left / right as seen by the
+        # robot, with their upper edge just under the rim
         left = np.stack([-np.sin(self.yaw), np.cos(self.yaw), np.zeros(n)], axis=1)
         reach = np.abs((left * bx).sum(1)) * hx + np.abs((left * by).sum(1)) * hy + np.abs((left * bz).sum(1)) * hz
+        middle = self.box_pos + bz * (hz - cfg.rim_thickness - 0.055)[:, None]
         self.grip_dist = np.stack([
-            np.linalg.norm(self.grip_pos[:, 0] - (self.box_pos + left * reach[:, None]), axis=1),
-            np.linalg.norm(self.grip_pos[:, 1] - (self.box_pos - left * reach[:, None]), axis=1)], axis=1)
-        gripped = (self.squeeze > cfg.grip_force) & (self.grip_dist < 0.12).all(axis=1)
+            np.linalg.norm(self.grip_pos[:, 0] - (middle + left * reach[:, None]), axis=1),
+            np.linalg.norm(self.grip_pos[:, 1] - (middle - left * reach[:, None]), axis=1)], axis=1)
+        gripped = (self.grip_dist < cfg.grip_distance).all(axis=1)
 
         # the box relative to the tables
         half_up = np.abs(bx[:, 2]) * hx + np.abs(by[:, 2]) * hy + np.abs(bz[:, 2]) * hz
@@ -293,8 +293,7 @@ class SortEnv(RobotEnv):
         fetch_stand = self.box_pos[:, 0:2] - self.table_dir[0] * cfg.stand_off
         fetch_dist = np.linalg.norm(fetch_stand - self.base_pos[:, 0:2], axis=1)
         stage = np.zeros(n, dtype=np.int64)
-        progress = 0.3 * np.exp(-fetch_dist / 0.5) + 0.5 * np.exp(-self.grip_dist.sum(axis=1) / 0.2) \
-            + 0.2 * np.clip(self.squeeze / cfg.grip_force, 0.0, 1.0)
+        progress = 0.3 * np.exp(-fetch_dist / 0.5) + 0.7 * np.exp(-self.grip_dist.sum(axis=1) / 0.2)
         lifting = gripped & over_pickup & (self.box_above < cfg.lift_height)
         stage[lifting] = 1
         # before the box leaves the table: the share of its weight the hands already carry
@@ -308,7 +307,8 @@ class SortEnv(RobotEnv):
         stage[lowering] = 3
         progress[lowering] = 1.0 - np.clip(self.box_above[lowering] / 0.12, 0.0, 1.0)
         stage[self.on_target] = 4
-        progress[self.on_target] = np.clip(self.grip_dist[self.on_target].min(axis=1) / (cfg.release_distance + 0.01), 0.0, 1.0)
+        progress[self.on_target] = np.clip((self.grip_dist[self.on_target].min(axis=1) - cfg.grip_distance) /
+                                           (cfg.release_distance + 0.01), 0.0, 1.0)
         self.stage, self.stage_progress = stage, progress
         self.max_stage = np.maximum(self.max_stage, stage)
 
@@ -344,7 +344,7 @@ class SortEnv(RobotEnv):
         fell = (self.base_pos[:, 2] < RobotCfg.min_height) | (self.projected_gravity[:, 2] > RobotCfg.max_tilt_gravity_z)
 
         # a box counts as sorted when it lies still on the right table with both hands off it
-        released = (self.grip_dist > cfg.release_distance).all(axis=1) & (self.squeeze < 0.5)
+        released = (self.grip_dist > cfg.release_distance).all(axis=1)
         still = np.linalg.norm(self.box_vel, axis=1) < 0.1
         self.placed_steps = np.where(self.on_target & released & still, self.placed_steps + 1, 0)
         self.just_sorted = self.placed_steps >= int(cfg.place_hold_s / self.dt)
@@ -412,7 +412,7 @@ class SortEnv(RobotEnv):
             self.box_half * 4.0,
             color,
             self._heading_frame(self.grip_pos[:, 0] - base), self._heading_frame(self.grip_pos[:, 1] - base),
-            np.clip(self.palm_touch / 20.0, 0.0, 3.0), np.clip(self.squeeze[:, None] / 20.0, 0.0, 3.0),
+            np.clip(self.palm_touch / 20.0, 0.0, 3.0),
             self._heading_frame(self.table_xy[0][None, :] - base[:, 0:2]),
             *tables,
             np.clip(self.sorted_count[:, None] / 4.0, 0.0, 2.0),
