@@ -124,7 +124,7 @@ class Scene:
         for pos, mat, size, rgb in self.sorted_boxes:
             up = mat.reshape(3, 3)[:, 2]
             for centre, half, colour in [(pos, size, rgb),
-                                         (pos + up * (size[2] - thick / 2), size + [rim, rim, thick / 2 - size[2]], 0.8 * rgb)]:
+                                         (pos + up * (size[2] - thick / 2), size + [0.0, rim, thick / 2 - size[2]], 0.8 * rgb)]:
                 if scn.ngeom >= scn.maxgeom:
                     return
                 mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_BOX, np.asarray(half, dtype=np.float64),

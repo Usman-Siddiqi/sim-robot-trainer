@@ -261,7 +261,7 @@ class RewardCfg:
 class SortCfg:
     """
     Task 2: sorting. A crate appears on the pickup table. The robot walks up to
-    it, puts its palms against the two sides - under the rim that runs around the
+    it, puts its palms against the two sides - under the rim that sticks out at the
     top of every crate -, lifts it, carries it to the table whose colour matches
     the crate, puts it down there and lets go. Then the next crate appears.
     Crates differ in weight (and size) and the robot is not told the weight: it
@@ -288,7 +288,7 @@ class SortCfg:
     mass_threshold = 1.7
     num_robot_variants = 8          # robot / floor physics variants (domain randomisation)
     box_friction = 1.0
-    rim_width = 0.06                # the rim sticks out this far beyond the sides [m]
+    rim_width = 0.06                # the rim sticks out this far beyond the left and right side [m]
     rim_thickness = 0.02
     # Contact model. With MuJoCo's default (pyramidal, soft) friction a squeezed box creeps out of the
     # hands within seconds. So: the exact elliptic friction cone everywhere, and a stiff, grippy

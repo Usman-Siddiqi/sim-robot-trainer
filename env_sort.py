@@ -78,9 +78,10 @@ def build_scene(box_size):
     hx, hy, hz = [s / 2 for s in box_size]
     box.add_geom(name="box", type=mujoco.mjtGeom.mjGEOM_BOX, size=[hx, hy, hz], mass=3.0,
                  contype=1, conaffinity=1, condim=4, friction=[cfg.box_friction, 0.02, 0.0001], rgba=[0.8, 0.2, 0.2, 1])
-    # the rim: a lid that is a little wider than the box; it rests on the palms when the box is carried
+    # the rim: a lid that sticks out on the left and right side; it rests on the palms when the box is
+    # carried (no rim at the front and back, where it would bump into the robot's chest)
     rim, thick = cfg.rim_width, cfg.rim_thickness
-    box.add_geom(name="box_rim", type=mujoco.mjtGeom.mjGEOM_BOX, pos=[0, 0, hz - thick / 2], size=[hx + rim, hy + rim, thick / 2],
+    box.add_geom(name="box_rim", type=mujoco.mjtGeom.mjGEOM_BOX, pos=[0, 0, hz - thick / 2], size=[hx, hy + rim, thick / 2],
                  mass=0.1, contype=1, conaffinity=1, condim=4, friction=[cfg.box_friction, 0.02, 0.0001], rgba=[0.7, 0.18, 0.18, 1])
     # pressure sensor under the box: how much of its weight still rests on a table
     box.add_site(name="box_bottom", type=mujoco.mjtGeom.mjGEOM_BOX, pos=[0, 0, -hz], size=[hx + 0.01, hy + 0.01, 0.015], rgba=[0, 0, 0, 0])
