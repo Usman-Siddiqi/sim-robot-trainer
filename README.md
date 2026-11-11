@@ -216,7 +216,7 @@ The remaining failures are concentrated where physics runs out: on slippery grou
 
 **Limits.** "Unseen" here means unseen terrain shapes and physical parameters inside the same simulator. It is evidence that the policy did not memorise its training set, not a guarantee for anything arbitrary: gaps, stepping stones, steps much taller than 18 cm, or a real robot are outside what was tested.
 
-You can also continue training from the pretrained policy: `python main.py train --resume pretrained/biped.pt`.
+You can also continue training from the pretrained policy: `python main.py train --resume pretrained/biped.pt`. The file is the full training checkpoint (network, optimizer state, learning rate and the curriculum level of every terrain), so training picks up exactly where it stopped.
 
 ## How it works
 
