@@ -115,6 +115,8 @@ def main():
     p.add_argument("--threads", type=int, default=None, help="physics threads (default: all cores)")
     p.add_argument("--resume", nargs="?", const="latest", default=None,
                    help="continue from a checkpoint (no path = the newest model of the task, else the bundled one)")
+    p.add_argument("--init-from", default=None, metavar="HIKE_MODEL",
+                   help="sort: hiking policy to start from (default: your newest hiking model, else the bundled one)")
     p.add_argument("--name", default=None, help="run name (default: timestamp)")
     p.add_argument("--seed", type=int, default=0)
 
@@ -162,8 +164,13 @@ def main():
             resume = resolve_model(None, args.task)
         elif resume and not os.path.exists(resume):
             sys.exit(f"Model not found: {resume}")
+        init_from = None
+        if args.task == "sort" and not resume:
+            # the sorting robot does not learn to walk again: it starts as a copy of a hiking policy
+            init_from = resolve_model(args.init_from, "hike")
         train(task=args.task, num_envs=args.num_envs, max_iterations=args.iterations, flat_only=args.flat,
-              device=args.device, num_threads=args.threads, resume=resume, run_name=args.name, seed=args.seed)
+              device=args.device, num_threads=args.threads, resume=resume, run_name=args.name, seed=args.seed,
+              init_from=init_from)
     elif args.command in ("play", "record", "eval"):
         model = resolve_model(args.model, args.task)
         if args.command == "play":

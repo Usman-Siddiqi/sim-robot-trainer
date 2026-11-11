@@ -31,8 +31,8 @@ W, H, FPS = 960, 544, 25
 HIKE = [
     dict(title="Rock steps", sub="irregular steps up and down, up to 20 cm", tag="TRAINED",
          terrain="climb", level=9, speed=0.6),
-    dict(title="Stepping stones", sub="zigzag stones with 25 cm gaps - miss one and it is a 1 m drop", tag="TRAINED",
-         terrain="stones", level=9, speed=0.6),
+    dict(title="Stepping stones", sub="zigzag stones with gaps - miss one and it is a 1 m drop", tag="TRAINED",
+         terrain="stones", level=6, speed=0.6),
     dict(title="Ridge and boulders", sub="50 cm wide ridge", tag="TRAINED",
          terrain="ridge", level=9, speed=0.6),
     dict(title="The full hike", sub="everything mixed, hardest level", tag="TRAINED",
@@ -98,7 +98,8 @@ def title_card(lines, seconds=2.4):
 
 def record_scenario(policy, task, device, sc, seed):
     env = make_scene(task, sc.get("terrain", "trail"), sc.get("level", 5), sc.get("speed", 0.6),
-                     seed=sc.get("seed", seed), physics=sc.get("physics"), push=sc.get("push"), box_mass=sc.get("box_mass"))
+                     seed=sc.get("seed", seed), physics=sc.get("physics"), push=sc.get("push"), box_mass=sc.get("box_mass"),
+                     guide=policy.guide, mass_level=None if sc.get("box_mass") else policy.mass_level)
     scene = Scene(policy, env, device)
     state = {"flash": None, "left": 0}
 

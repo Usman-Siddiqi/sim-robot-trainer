@@ -1,29 +1,52 @@
 # Sim Robot Trainer
 
-Teaches a simulated two-legged robot to walk, climb stairs and cross rough terrain with reinforcement learning (PPO) - and checks that it still works in places it was never trained in.
+Teaches a simulated humanoid two things with reinforcement learning (PPO):
 
-Thousands of robots are simulated in parallel with [MuJoCo](https://mujoco.org/), a
-terrain curriculum moves them from flat ground to taller stairs and steeper slopes,
-the physics is randomised so the controller cannot overfit to one simulator setup, and a
-from-scratch PPO implementation in PyTorch learns the controller.
+1. **Hike** - follow winding mountain trails: irregular rock steps, stepping stones with
+   gaps, narrow ridges, boulders. Fall off the side and it is a one metre drop.
+2. **Sort** - pick up crates of different weights and carry each one to the table of its
+   colour.
 
-| Trained on | Never trained on | Never trained on |
+Thousands of robots are simulated in parallel with [MuJoCo](https://mujoco.org/), curricula
+make the tasks harder as the robots get better, the physics is randomised so the controller
+cannot overfit to one simulator setup, and a from-scratch PPO implementation in PyTorch
+learns the controllers.
+
+**Status**
+
+| Task | State | Bundled checkpoint |
 | --- | --- | --- |
-| ![Climbing 16 cm stairs](docs/stairs_up.gif) | ![Irregular stairs](docs/unseen_irregular_stairs.gif) | ![Scattered blocks](docs/unseen_blocks.gif) |
-| regular stairs, hardest level | stairs where every step has a different height and depth | randomly scattered blocks |
+| hike | trained (2,400 iterations) and evaluated, see [results](#hike-results) | `pretrained/hike.pt` |
+| sort | **training in progress, it does not sort yet.** After 450 iterations the robot walks to the table, hooks its palms under the rim of the crate and lifts it; carrying it to the right table and putting it down is what is left to learn. See [continuing the sorting training](#continuing-the-sorting-training). | `pretrained/sort.pt` |
 
-*The bundled pretrained policy (`pretrained/biped.pt`). A 76-second video of eight scenarios - trained terrains, unseen terrains, shoves and an overloaded robot - is in [docs/showcase.mp4](docs/showcase.mp4).*
+A 2.5 minute video of the hiking policy on seven trails - four training trails, a trail
+layout and switchbacks it never trained on, and a hike with a heavy backpack while being
+shoved: [docs/hike.mp4](docs/hike.mp4).
 
 Built as a reinforcement learning practice project, with the main goal of understanding
-how the robot model, environment design, rewards and training setup affect locomotion.
+how the robot model, environment design, rewards and training setup decide whether a robot
+learns anything at all.
 
-## What it does
+## What is in it
 
-- **12-DoF biped** (`robot/biped.xml`): hip yaw / roll / pitch, knee, ankle pitch / roll per leg, ~25 kg, PD position servos with torque limits
-- **Tasks**: follow a commanded speed and heading over flat and rough ground, stairs up and down (3 cm → 16 cm steps, random tread depth) and slopes up and down (up to 22°), each in 10 curriculum levels
-- **Generalisation**: training randomises friction, payload, motor strength, sensor noise and shoves; `python main.py eval` then tests the policy on 11 terrain types and 6 physical conditions that are never used in training
-- **Fast**: physics for all robots is stepped by MuJoCo's multi-threaded rollout on every CPU core, the neural networks run on the GPU
-- **Tools**: interactive viewer, video export, evaluation table, TensorBoard logging, resumable checkpoints
+- **20-DoF humanoid** (`robot/humanoid.xml`): two legs (hip yaw / roll / pitch, knee, ankle
+  pitch / roll) and two arms (shoulder pitch / roll / yaw, elbow) ending in flat palms,
+  28.5 kg, PD position servos with torque limits. The arms are free to swing for balance
+  when hiking and carry the crates when sorting.
+- **Hiking trails** (`terrain.py`): procedurally generated, raised, winding paths built from
+  rock columns, assembled from sections (rock steps, stepping stones, ridges, boulders, ...)
+  in 10 difficulty levels. A curriculum moves every robot to harder or easier trails
+  depending on how it did.
+- **Sorting room** (`env_sort.py`): a pickup table, three coloured drop-off tables (which is
+  which changes every episode) and crates of 0.5 - 6 kg in five sizes. The robot is not told
+  the weight of a crate.
+- **Generalisation**: training randomises friction, payload, motor strength, sensor noise
+  and shoves; `python main.py eval` then tests on trail sections, layouts and physics that
+  were never used in training.
+- **Fast**: physics for all robots is stepped by MuJoCo's multi-threaded rollout on every
+  CPU core, the neural networks run on the GPU.
+- **Tools**: interactive viewer, video export, evaluation tables, TensorBoard logging,
+  resumable checkpoints.
 
 Tuned for a Ryzen 7 8845HS + RTX 4050 laptop, but it runs on anything (a GPU is optional).
 
@@ -47,7 +70,8 @@ venv\Scripts\activate
 source venv/bin/activate
 ```
 
-Install PyTorch **with CUDA first** (a plain `pip install torch` on Windows installs the CPU-only build and the RTX 4050 would sit idle):
+Install PyTorch **with CUDA first** (a plain `pip install torch` on Windows installs the
+CPU-only build and the RTX 4050 would sit idle):
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cu126
@@ -59,209 +83,227 @@ Then the rest:
 pip install -r requirements.txt
 ```
 
-Check that everything works and see how fast your machine simulates:
+Check that everything is in place (prints the device PyTorch uses and the simulation speed):
 
 ```bash
-python main.py bench
+python main.py bench --task hike
 ```
-
-It should print `device: cuda (NVIDIA GeForce RTX 4050 ...)`. If it says `cpu`, the CUDA build of PyTorch is not installed (training still works, the PPO update is just slower).
 
 ## Usage
 
-Watch the bundled pretrained policy climb stairs (no training needed):
+Every command takes `--task hike` (the default) or `--task sort`.
+
+Watch the bundled policies in the MuJoCo viewer:
 
 ```bash
-python main.py play --model pretrained/biped.pt
+python main.py play --task hike --terrain trail --level 7
 ```
-
-Train the full task (flat + rough ground, stairs and slopes, with randomised physics):
 
 ```bash
-python main.py train
+python main.py play --task sort
 ```
 
-Train on flat ground only (quick sanity check, walks after a few minutes):
+Hiking trails to choose from: `flat`, `rocky`, `climb`, `stones`, `ridge`, `trail` (the
+training trails) and `logs`, `terraces`, `rubble`, `staircase`, `switchbacks`, `new_trail`
+(never used in training). Keys in the viewer: BACKSPACE restarts, UP / DOWN change the
+walking speed.
+
+Measure success rates, including conditions the policy never trained in:
 
 ```bash
-python main.py train --flat --iterations 400
+python main.py eval --task hike
 ```
 
-Stop any time with `Ctrl+C` (the policy is saved) and continue later:
+Render a video without opening a window:
 
 ```bash
-python main.py train --resume
+python main.py record --task hike --terrain stones --level 6 --output stones.mp4
 ```
 
-Watch your newest model, choosing terrain, difficulty level (0-9) and speed:
+Train. Checkpoints go to `models/<run name>/` every 50 iterations, Ctrl+C saves and stops,
+`--resume` continues from the newest model of that task (or from the bundled one if you
+have none):
 
 ```bash
-python main.py play --terrain stairs_up --level 7 --speed 0.6
+python main.py train --task hike --resume
 ```
-
-`--terrain` takes the training terrains (`flat`, `rough`, `stairs_up`, `stairs_down`, `slope_up`, `slope_down`) and the held-out test terrains (`irregular_stairs_up`, `irregular_stairs_down`, `steep_stairs_up`, `steep_stairs_down`, `landing_stairs_up`, `ramp_then_stairs`, `scattered_blocks`, `waves`, `steep_slope_up`, `steep_slope_down`, `very_rough`).
-
-In the viewer: `UP`/`DOWN` change the speed, `LEFT`/`RIGHT` turn, `BACKSPACE` restarts the episode.
-
-Measure how good a model is, on the training terrains and on terrains / physics it has never seen:
 
 ```bash
-python main.py eval
+python main.py train --task sort --resume
 ```
 
-Use `--suite trained` or `--suite unseen` for one half only, and `--num_envs` to trade accuracy for time.
-
-Save a video:
-
-```bash
-python main.py record --terrain stairs_up --level 7 --output stairs.mp4
-```
-
-Record the captioned eight-scenario showcase video (default: pretrained policy, `docs/showcase.mp4`):
-
-```bash
-python showcase.py --model models/<run>/model_final.pt --output my_run.mp4
-```
-
-List saved models:
-
-```bash
-python main.py list
-```
-
-Every command has `--help`, e.g. `python main.py train --help`. `play`, `eval` and `record` use the newest model in `models/` unless you pass `--model path/to/model.pt`.
-
-## Training on the 8845HS + RTX 4050
-
-The defaults in `config.py` are chosen for this laptop:
-
-| Setting | Default | Why |
-| --- | --- | --- |
-| `num_envs` | 2048 robots | enough parallel experience per update while keeping iterations short |
-| physics threads | all 16 | MuJoCo rollout thread pool, one robot batch per thread |
-| networks | 512-256-128 MLPs on the GPU | one batched forward pass per control step, PPO update on ~12k-sample minibatches |
-| physics / control rate | 200 Hz / 50 Hz | 4 physics steps per policy step |
-
-What to expect (one iteration = 2048 robots x 24 steps = 49,152 simulation steps):
-
-| Iterations | Steps | What the robots can do |
-| --- | --- | --- |
-| ~100 | 5 M | stay upright and walk on flat ground, still falling fairly often |
-| ~150 | 7 M | cross the easiest obstacles (3-5 cm steps, gentle slopes) |
-| ~300 | 15 M | mid-level obstacles (10 cm steps, 13° slopes) |
-| ~400 | 20 M | the first robots finish the hardest levels |
-| ~850 | 42 M | 96-98 % of obstacle tiles crossed, 3 % falls (with shoves, noise and randomised physics on) |
-| ~1200 | 59 M | 99-100 % on the training terrains, and the unseen-condition results listed below |
-
-These numbers are from an actual run of `python main.py train` with the default settings and seed. That run was done on a 4-core cloud CPU without a GPU (about 5 s per iteration, roughly two hours for 1200 iterations); the 8845HS has four times the threads and much faster cores, and the 4050 takes the PPO update off the CPU, so expect it to be several times faster. `python main.py bench` tells you the simulation speed on your machine.
-
-The default run length is 1500 iterations. Stop early with `Ctrl+C` whenever `python main.py eval` looks good enough.
-
-Tips:
-
-- Plug the laptop in and use the performance power profile, otherwise the CPU is throttled hard.
-- Simulation speed is CPU-bound. If you want the machine usable while training, pass `--threads 12`.
-- `--num_envs 4096` gives smoother learning per iteration at twice the simulation time per iteration; VRAM is not a concern (the policy is tiny).
-- Use `--device cpu` to compare, or if CUDA is not available.
-
-## Monitoring
+Training curves:
 
 ```bash
 tensorboard --logdir logs
 ```
 
-Useful curves: `train/mean_return`, `episode/terrain_level` (curriculum progress, also per terrain under `episode/level/*`), `episode/success`, `episode/fell` and the individual reward terms under `episode/reward/*`.
+### Continuing the sorting training
 
-The console prints one line every 10 iterations (this one is from the 4-core CPU-only reference run):
+The bundled `pretrained/sort.pt` is a full checkpoint (network, optimizer, curriculum
+state) of an unfinished run. To carry on from it:
 
-```text
-it  1000/1500 |  10,190 steps/s (sim  2.6s, learn  2.3s) | return   16.46 | ep len  414.7 | fell 0.02 | level 5.98 ok 0.99 | std 0.36 | lr 2e-04 | eta  55.6 min
+```bash
+python main.py train --task sort --resume pretrained/sort.pt --iterations 3000 --name sort_laptop
 ```
 
-`level` is the average curriculum level of the robots on obstacle tiles (0 = easiest, 9 = hardest) and `ok` is the fraction of their episodes that crossed the whole tile. Because robots that beat level 9 are sent back to a random level, a policy that has mastered everything hovers around level 6 with `ok` near 1.00. Episodes on obstacle tiles end as soon as the robot reaches the goal, so `return` and `ep len` are lower than on flat ground - that is expected.
+What to watch in the console (the same numbers are in TensorBoard under `episode/`):
 
-## Pretrained policy and how well it generalises
+| Column | Meaning | Where the bundled checkpoint is |
+| --- | --- | --- |
+| `stage` | furthest stage reached per episode, averaged: 0 fetch, 1 lift, 2 carry, 3 lower, 4 release | about 1 |
+| `sorted` | crates sorted per 30 s episode | 0 |
+| `kg` | heaviest crate in use; one more weight is added whenever `stage` reaches 1.7 | 1.5 |
+| `guided` | share of robots that are told where to walk, see below; goes down once `sorted` reaches 1 | 1.00 |
+| `drop` / `wrong` | crates dropped / put on the wrong table per episode | 0.6 / 0 |
 
-`pretrained/biped.pt` is the result of `python main.py train` (default settings, seed 0) stopped at iteration 1200 (59 million steps). All numbers below come from `python main.py eval --model pretrained/biped.pt` (2000 robots per test, one episode each, exploration noise off). Success means crossing the whole obstacle tile, or on flat ground not falling for the full 20 s.
+The run is finished when `guided` is 0.00, `kg` is 6.00 and `sorted` has stopped rising.
+How long that takes is not known yet: nobody has run it to the end. On the 4-core CPU it
+was developed on it ran at about 3,500 steps/s (16 s per iteration); the laptop should be
+several times faster. If `stage` stays below 1.7 for many hundreds of iterations, the
+rewards in `SortCfg` (config.py) are the place to experiment - the section
+[what was learned building this](#what-was-learned-building-this) lists what has been
+tried.
 
-**Training terrains** (nominal robot): 100 % on flat, rough, stairs up, stairs down, slope up and slope down, at every level.
+To start the sorting training from the beginning instead (it starts from a hiking
+policy - your newest one, or the bundled one):
 
-**Unseen terrains** - generators or parameter ranges that are never used in training:
+```bash
+python main.py train --task sort --name sort_from_hiker
+```
 
-| Terrain | What is new about it | Success | Hardest level |
-| --- | --- | --- | --- |
-| irregular stairs up / down | every step has its own random height and depth | 100 % / 100 % | 100 % / 100 % |
-| steep stairs up / down | 25 cm treads, steps up to 18 cm (training: 26-40 cm, up to 16 cm) | 100 % / 99 % | 100 % / 89 % |
-| stairs with landings | flights of three steps with 90 cm landings | 100 % | 100 % |
-| ramp then stairs | a slope that turns into a staircase | 100 % | 100 % |
-| scattered blocks | random blocks up to 13 cm to step on and off | 99 % | 100 % |
-| waves | rolling hills, up to 35 cm peak to peak | 100 % | 100 % |
-| steep slope up / down | up to 27° (training: up to 22°) | 100 % / 100 % | 100 % / 100 % |
-| very rough | bumps up to 12 cm (training: up to 8 cm) | 100 % | 100 % |
+## Hike results
 
-**Unseen conditions** - the training terrains (all levels) with physics or commands outside the training ranges:
+`pretrained/hike.pt` after 2,400 iterations (49 million simulation steps), measured with
+`python main.py eval --task hike --num_envs 1000`: one episode per robot, exploration noise
+off, success = reaching the end of the trail within 30 s.
 
-| Condition | Training range | Success | Fell |
-| --- | --- | --- | --- |
-| slippery, friction 0.4 | 0.5 - 1.25 | 94 % | 6 % |
-| heavy payload, +6 kg | -1 to +3 kg | 100 % | 0 % |
-| weak motors, 80 % | 90 - 110 % | 100 % | 0 % |
-| hard shoves, 0.8 m/s every 3 s | 0.5 m/s every 5 s | 96 % | 4 % |
-| diagonal approach, 45° | up to 29° | 100 % | 0 % |
-| all at once: friction 0.45, +5 kg, 85 % motors, 0.6 m/s shoves | - | 93 % | 7 % |
+**Training trails**, nominal robot (success per difficulty level, L9 is the hardest):
 
-The remaining failures are concentrated where physics runs out: on slippery ground the robot still does stairs and rough ground at 100 %, and slopes up to 0.28 (16°) at 97-100 %. It manages the 0.32 slope about 80 % of the time and slides on the two steepest ones (0.36 and 0.40), which are at 90-100 % of the friction coefficient of 0.4 - no controller can walk on those.
+| Trail | Success | L0 | L1 | L2 | L3 | L4 | L5 | L6 | L7 | L8 | L9 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| flat (no trail: not falling) | 100% | | | | | | | | | | |
+| rocky (bumpy paving, rock steps) | 100% | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 |
+| climb (steps up to 20 cm) | 100% | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 |
+| ridge (down to 50 cm wide, boulders) | 99% | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 92 |
+| trail (everything mixed) | 81% | 100 | 100 | 100 | 100 | 90 | 83 | 90 | 100 | 50 | 0 |
+| stones (stepping stones) | 62% | 100 | 100 | 100 | 85 | 77 | 42 | 100 | 0 | 0 | 0 |
 
-**What randomisation bought.** The first version of this project was trained without it (one staircase shape, friction 1.0, light shoves only). The same test suite on that policy: 91 % and 84 % on steep stairs / steep slopes going down (now 99 % and 100 %), 77 % under hard shoves (now 96 %), 90 % on slippery ground (now 94 %) and 84 % with everything at once (now 93 %).
+**Trails it never trained on** (sections that do not exist in training, or lie outside the
+training ranges, on layouts generated with a different seed):
 
-**Limits.** "Unseen" here means unseen terrain shapes and physical parameters inside the same simulator. It is evidence that the policy did not memorise its training set, not a guarantee for anything arbitrary: gaps, stepping stones, steps much taller than 18 cm, or a real robot are outside what was tested.
+| Trail | Success |
+| --- | --- |
+| rubble (smaller, taller bumps) | 99% |
+| terraces (left and right half of the trail at different heights) | 93% |
+| switchbacks (swings 60% further left / right) | 90% |
+| new_trail (training sections and the new ones mixed) | 81% |
+| logs (logs across the trail, up to 20 cm) | 69% |
+| staircase (regular stairs up to 22 cm) | 65% |
 
-You can also continue training from the pretrained policy: `python main.py train --resume pretrained/biped.pt`. The file is the full training checkpoint (network, optimizer state, learning rate and the curriculum level of every terrain), so training picks up exactly where it stopped.
+**Physics it never trained with**, on the training trails:
+
+| Condition | Success |
+| --- | --- |
+| slippery (friction 0.4; training 0.5 - 1.25) | 88% |
+| heavy backpack (+6 kg; training up to +3 kg) | 87% |
+| weak motors (80%; training 90 - 110%) | 87% |
+| hard shoves (0.8 m/s every 3 s; training 0.5 m/s every 5 s) | 83% |
+| all of that at once (milder) | 78% |
+
+The limits are where the table says they are: stepping stones with 25 cm gaps (levels
+7 - 9; levels 3 - 6 have 12.5 cm gaps) are not solved, and that drags down the hardest
+mixed trails and every "unseen physics" row, where `stones` is by far the weakest trail.
+The stepping stone level was still rising when training stopped, so more iterations should
+help:
+
+```bash
+python main.py train --task hike --resume pretrained/hike.pt --iterations 1000 --name hike_more
+```
 
 ## How it works
 
-**Robot.** `robot/biped.xml` is a MuJoCo model with a floating torso and two 6-joint legs. The policy outputs 12 joint position targets (offsets from a slightly crouched default pose) at 50 Hz; PD servos inside the simulator turn them into torques at 200 Hz.
-
-**Terrain.** `terrain.py` builds a grid of 10 m tiles, one row per terrain type and one column per difficulty level: flat ground, rough ground, "pit" stairs and slopes the robot must climb out of, and "pyramid" stairs and slopes it must walk down. Stairs are built from boxes, smooth shapes from height fields, and a height raster of the whole world answers terrain queries for all robots at once. All robots share one world but each lives in its own copy of the physics state, so they never collide with each other.
-
-**Curriculum.** A robot that crosses its whole tile is moved to the next harder level; one that falls or gets stuck is moved down. Robots that beat the hardest level are sent to a random level.
-
-**Domain randomisation.** So that the policy does not memorise one exact simulator, training uses 32 variants of the robot with different friction (0.5-1.25), payload (-1 to +3 kg), centre of mass and motor strength (90-110 %), shoves every robot every 5 s, adds noise to every sensor reading, gives every staircase a different tread depth (26-40 cm) and approaches obstacles up to 29° off square-on. All ranges are in `DomainRandCfg`.
-
-**Testing generalisation.** `EvalCfg` in `config.py` defines conditions that are deliberately kept out of training: terrain generators the policy never sees (irregular stairs, stairs with landings, a ramp that turns into stairs, scattered blocks, rolling waves) or parameters beyond the training range (25 cm treads with 18 cm steps, 27° slopes, 12 cm bumps), and physics outside the randomisation ranges (friction 0.4, +6 kg payload, 80 % motors, 0.8 m/s shoves, 45° approach, and several of these at once). `python main.py eval` runs all of them. If you add something from `EvalCfg` to training, it stops being a test of generalisation - add a new held-out case instead.
-
-**Observation (105 numbers).** Base linear and angular velocity, gravity direction, the velocity command, joint positions and velocities, the previous action, a gait clock (sin/cos), and a 11x5 height scan of the terrain around the robot.
-
-**Reward.** Track the commanded speed and heading, stay alive, step in rhythm with the gait clock and lift the swing foot clear of the next step, with penalties for wobbling, crouching, sliding feet, jerky actions, torque and joint limits. All weights are in `RewardCfg` in `config.py`.
-
-**PPO.** `agent.py` is a compact PPO: separate actor and critic MLPs, running observation normalisation, GAE, clipped surrogate + clipped value loss, and a KL-adaptive learning rate. Timeouts are bootstrapped so "the episode ran out of time" is not treated like "the robot fell".
-
-## Project layout
-
-```text
-sim-robot-trainer/
-├── main.py           command line interface
-├── config.py         every tunable number (simulation, terrain, rewards, PPO)
-├── environment.py    batched MuJoCo environment (observations, rewards, resets, curriculum)
-├── terrain.py        stairs generation + fast terrain height lookup
-├── agent.py          actor-critic networks and the PPO algorithm
-├── train.py          training loop, logging, checkpoints
-├── play.py           viewer, video recording, evaluation
-├── showcase.py       captioned multi-scenario demo video
-├── robot/biped.xml   the robot model (MJCF)
-├── pretrained/       a trained policy to try out
-├── docs/             images for this README
-├── models/           your checkpoints (created by training)
-└── logs/             TensorBoard logs (created by training)
+```
+main.py        command line interface
+config.py      every tunable number: robot, both tasks, randomisation, rewards, PPO
+robot/         humanoid.xml - the MuJoCo model
+terrain.py     hiking trails: column heights -> collision boxes + height lookup + path
+env_base.py    batched simulation, robot bookkeeping, shared rewards
+env_hike.py    task 1: commands, height scan, curriculum
+env_sort.py    task 2: the room, the crates, stages, guidance
+agent.py       actor-critic networks, PPO, checkpoints, policy transfer
+train.py       the training loop
+play.py        viewer, video recorder, evaluation
+showcase.py    records the captioned demo video
 ```
 
-## Troubleshooting
+**Simulation.** All robots are stepped together by `mujoco.rollout` on a C++ thread pool;
+observations and rewards are computed for the whole batch in numpy. Every robot lives in
+its own copy of one scene (one trail tile, or the sorting room), so robots never meet. A
+trail tile is one small MuJoCo model; a single world containing all 60 trails would be
+several times slower to step.
 
-- **`device: cpu` on a machine with an NVIDIA GPU**: reinstall PyTorch from the CUDA index (see Setup), and update the NVIDIA driver.
-- **The viewer window does not open**: update your graphics driver; on Linux a desktop session is required. `python main.py record` works without a window.
-- **Robots never get past low levels**: train longer, look at `episode/level/*` in TensorBoard to see which terrain is the bottleneck and at `episode/reward/*` to see which reward term dominates.
-- **Changed the observation or the robot?** Old checkpoints will not fit any more; start a fresh run.
+**Control.** The policy runs at 50 Hz and outputs 20 joint position targets (offsets from a
+default pose) that PD servos track at 200 Hz.
 
-## Repository
+**Hiking.** A navigation layer turns "where does the trail go" into a velocity command
+(forward, sideways, turning rate): walk towards the point 0.75 m ahead on the trail and face
+the way the trail runs. The policy sees that command, its own motion and joints, a gait
+clock and a 16 x 9 height scan of the ground ahead (218 numbers), and has to realise the
+command without falling off.
 
-GitHub: [Usman-Siddiqi/sim-robot-trainer](https://github.com/Usman-Siddiqi/sim-robot-trainer)
+**Sorting.** The reward is a progress score, `5 x crates sorted + stage + progress within
+the stage`, with the stages fetch, lift, carry, lower, release - finishing a stage always
+pays more than lingering in it. Which stage a robot is in is worked out from the physical
+state (where the palms and the crate are, how much of the crate's weight still rests on
+the table).
+
+The sorting policy is not trained from nothing: it starts as a copy of the hiking policy
+(its observation begins with the hiking observation, the weights of the 35 extra inputs
+start at zero), so it can walk from the first iteration. At first a "guide" - a few lines
+of code that know the rules - gives it velocity commands to the crate and then to the
+right table. Once robots sort crates that way the guide is withdrawn from more and more
+robots, which then only see the colour of the crate and where the red, the green and the
+blue table are. A finished policy gets no commands at all and does the sorting itself.
+
+**Learning.** PPO with generalised advantage estimation, a clipped value loss, observation
+normalisation and a learning rate that adapts to keep the policy change per update constant
+(`agent.py`, about 300 lines).
+
+## What was learned building this
+
+Things that did not work, in case you run into the same walls:
+
+- **A reward the robot can collect by doing nothing.** Twice the hiking robot learned to
+  stand still: whenever it faced the wrong way it was asked for a slow walk plus a sharp
+  turn, and the speed reward is so forgiving for slow commands that not moving cost almost
+  nothing. Commands now keep a real walking speed while turning.
+- **Steering that asks for the wrong skill.** On zigzag stepping stones the navigation layer
+  used to turn the robot towards every next stone. It now keeps facing along the trail and
+  asks for a sideways step; stepping stones went from level 2 to level 6.
+- **Exploration noise that grows.** With arms added, the entropy bonus kept inflating the
+  noise of joints that hardly affect the reward (ankle roll, shoulder roll) until precise
+  foot placement was impossible. The bonus was lowered and the noise capped.
+- **Sorting from scratch.** One policy learning to stand, walk, grasp and carry all at once
+  was still falling over after 150 iterations. Starting from the hiking policy fixed that.
+- **Squeezing a smooth box between two flat palms.** Five reward variants got the robot to
+  reach and squeeze, never to lift: holding a box by friction alone needs well coordinated
+  shoulder torques close to their limits, and the reward is flat until the box actually
+  leaves the table. The boxes became crates with a rim the palms hook under, and the lift
+  is rewarded by the share of the weight the hands already carry.
+- **Penalties that teach avoidance.** A penalty for dropping a crate taught the robots to
+  keep their hands away from crates. A dropped crate is now simply replaced.
+
+## Hardware notes (Ryzen 7 8845HS + RTX 4050)
+
+- Physics is CPU bound: more cores, more robots per second. `python main.py bench` shows
+  what your machine does. Plug the laptop in and use the performance power profile.
+- The networks are small; the GPU mainly makes the PPO update fast. If PyTorch reports
+  `device: cpu`, the CPU-only build of torch is installed - reinstall with the CUDA command
+  from the setup section.
+- 2,048 robots is the default. `--num_envs 4096` gives smoother learning if the CPU keeps
+  up; halve it if the machine is short of memory.
+
+## License
+
+See [LICENSE](LICENSE).

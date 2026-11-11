@@ -30,15 +30,33 @@ def load(policy_path, device="cpu"):
     device = get_device(device)
     policy, ckpt = load_policy(policy_path, device)
     policy.eval()
+    # A sorting policy whose training is not finished still relies on the guide (see SortCfg): it is
+    # shown and tested the way it was trained, and with the box weights it has got to so far.
+    state = ckpt.get("curriculum") or {}
+    policy.guide = 1.0 if state.get("guide", 0.0) > 0.0 else 0.0
+    policy.mass_level = state.get("mass_level")
     return policy, ckpt.get("task", "hike"), device
 
 
-def make_scene(task, terrain="trail", level=5, speed=0.6, seed=0, physics=None, push=None, box_mass=None):
+def sort_stage_note(policy):
+    """One line saying how far a sorting policy's training has got (empty when it is finished)."""
+    notes = []
+    if getattr(policy, "guide", 0.0) > 0.0:
+        notes.append("still uses the guide's walking commands")
+    if getattr(policy, "mass_level", None) and policy.mass_level < SortCfg.num_box_masses:
+        lo, hi = SortCfg.box_mass
+        top = lo + (hi - lo) * (policy.mass_level - 1) / (SortCfg.num_box_masses - 1)
+        notes.append(f"has only trained with boxes up to {top:.1f} kg")
+    return "Training of this sorting policy is not finished: it " + " and ".join(notes) + "." if notes else ""
+
+
+def make_scene(task, terrain="trail", level=5, speed=0.6, seed=0, physics=None, push=None, box_mass=None,
+               guide=0.0, mass_level=None):
     """One nominal robot for watching: no curriculum, no sensor noise, no pushes unless asked for."""
     if task == "sort":
         from env_sort import SortEnv
         return SortEnv(num_envs=1, num_threads=1, seed=seed, randomize=False, physics=physics, push=push,
-                       box_mass=box_mass)
+                       box_mass=box_mass, guide=guide, mass_level=mass_level)
     from env_hike import HikeEnv, row_by_name
     flat = dict(HikeCfg.flat_rows[0], weight=0.0)
     rows = None if terrain == "flat" else [flat, dict(row_by_name(terrain), weight=1.0)]
@@ -51,8 +69,8 @@ def make_camera(env, model):
     cam = mujoco.MjvCamera()
     if env.task == "sort":                                  # fixed view of the whole room
         cam.type = mujoco.mjtCamera.mjCAMERA_FREE
-        cam.lookat[:] = [0.1, 0.0, 0.65]
-        cam.distance, cam.azimuth, cam.elevation = 4.6, 150.0, -28.0
+        cam.lookat[:] = [0.0, 0.0, 0.55]
+        cam.distance, cam.azimuth, cam.elevation = 3.7, 150.0, -32.0
     else:                                                   # follow the hiker
         cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
         cam.trackbodyid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "torso")
@@ -143,9 +161,11 @@ def play(policy_path, terrain="trail", level=5, speed=0.6, device="cpu", seed=0,
     import mujoco.viewer
 
     policy, task, device = load(policy_path, device)
-    env = make_scene(task, terrain, level, speed, seed)
+    env = make_scene(task, terrain, level, speed, seed, guide=policy.guide, mass_level=policy.mass_level)
     scene = Scene(policy, env, device)
     state = {"reset": False}
+    if task == "sort" and sort_stage_note(policy):
+        print(sort_stage_note(policy))
 
     def on_key(key):
         if key == 259:      # backspace
@@ -218,8 +238,10 @@ def record(policy_path, output="robot.mp4", terrain="trail", level=5, speed=0.6,
         raise SystemExit("Recording needs imageio:  pip install imageio imageio-ffmpeg") from exc
 
     policy, task, device = load(policy_path, device)
-    env = make_scene(task, terrain, level, speed, seed)
+    env = make_scene(task, terrain, level, speed, seed, guide=policy.guide, mass_level=policy.mass_level)
     scene = Scene(policy, env, device)
+    if task == "sort" and sort_stage_note(policy):
+        print(sort_stage_note(policy))
     frames, events = render_episode(scene, seconds or env.episode_length_s, width, height)
     env.close()
     os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
@@ -359,23 +381,28 @@ def _sort_summary(r):
 def evaluate_sort(policy, device, num_envs=1000, num_threads=None, seed=123, suite="all", verbose=True):
     from env_sort import SortEnv
 
-    common = dict(num_envs=num_envs, num_threads=num_threads, seed=seed)
+    common = dict(num_envs=num_envs, num_threads=num_threads, seed=seed, guide=policy.guide)
+    if verbose and sort_stage_note(policy):
+        print(sort_stage_note(policy))
     results = {}
     row = lambda name, s: (f"  {name:<44}{s['boxes']:>7.2f}{s['any']:>12.0%}{s['fell']:>8.0%}"
                            f"{s['dropped']:>9.2f}{s['wrong']:>8.2f}")
     header = (f"  {'':<44}{'boxes':>7}{'>= 1 box':>12}{'robot':>8}{'boxes':>9}{'wrong':>8}\n"
               f"  {'':<44}{'sorted':>7}{'sorted':>12}{'fell':>8}{'dropped':>9}{'table':>8}      (per 30 s episode)")
     if suite in ("trained", "all"):
-        env = SortEnv(randomize=False, **common)
+        env = SortEnv(randomize=False, mass_level=policy.mass_level, **common)
         r = _sort_episodes(policy, env, device)
         results["trained"] = _sort_summary(r)
-        results["by_mass"] = {float(m): float(r["first_sorted"][r["first_mass"] == m].mean()) for m in env.box_masses}
+        results["by_mass"] = {float(m): float(r["first_sorted"][r["first_mass"] == m].mean())
+                              for m in env.box_masses[:env.mass_level]}
         if verbose:
-            print(f"\nTRAINING CONDITIONS (nominal robot, boxes {env.box_masses[0]:.1f} - {env.box_masses[-1]:.1f} kg)")
+            print(f"\nTRAINING CONDITIONS (nominal robot, boxes {env.box_masses[0]:.1f} - "
+                  f"{env.box_masses[env.mass_level - 1]:.1f} kg)")
             print(header)
             print(row("sorting room", results["trained"]))
             print("  first box sorted, by weight:  " + "   ".join(f"{m:.1f} kg {v:.0%}" for m, v in results["by_mass"].items()))
-            print(f"  time to sort the first box: {np.nanmean(r['first_time']):.1f} s on average")
+            if r["first_sorted"].any():
+                print(f"  time to sort the first box: {np.nanmean(r['first_time']):.1f} s on average")
         env.close()
     if suite in ("unseen", "all"):
         results["unseen_conditions"] = {}

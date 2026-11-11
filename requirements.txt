@@ -12,6 +12,9 @@ numpy>=1.26.0
 # Training curves (optional but recommended)
 tensorboard>=2.14.0
 
-# Only needed for `python main.py record` (video export)
+# Only needed for `python main.py record` and showcase.py (video export)
 imageio>=2.30.0
 imageio-ffmpeg>=0.4.9
+
+# Only needed for showcase.py (captions on the demo video)
+pillow>=10.0.0
