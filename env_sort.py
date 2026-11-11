@@ -242,9 +242,10 @@ class SortEnv(RobotEnv):
         facing = np.arctan2(out[1], out[0])
         stand = self.place_xy[0] - out * cfg.stand_off
         r, a = 0.6 * np.sqrt(rng.random(n)), rng.uniform(-np.pi, np.pi, n)
-        x = np.where(near, stand[0] - out[0] * rng.uniform(0.0, 0.25, n) + rng.uniform(-0.08, 0.08, n), r * np.cos(a))
-        y = np.where(near, stand[1] - out[1] * rng.uniform(0.0, 0.25, n) + rng.uniform(-0.08, 0.08, n), r * np.sin(a))
-        yaw = np.where(near, facing + rng.uniform(-0.3, 0.3, n), rng.uniform(-np.pi, np.pi, n))
+        back = rng.uniform(0.0, 0.08, n)
+        x = np.where(near, stand[0] - out[0] * back + rng.uniform(-0.04, 0.04, n), r * np.cos(a))
+        y = np.where(near, stand[1] - out[1] * back + rng.uniform(-0.04, 0.04, n), r * np.sin(a))
+        yaw = np.where(near, facing + rng.uniform(-0.2, 0.2, n), rng.uniform(-np.pi, np.pi, n))
         self._robot_reset_state(ids, x, y, RobotCfg.init_height, yaw)
 
     def _read_task_sensors(self, sensors):
@@ -294,7 +295,7 @@ class SortEnv(RobotEnv):
         fetch_stand = self.box_pos[:, 0:2] - self.table_dir[0] * cfg.stand_off
         fetch_dist = np.linalg.norm(fetch_stand - self.base_pos[:, 0:2], axis=1)
         stage = np.zeros(n, dtype=np.int64)
-        progress = 0.3 * np.exp(-fetch_dist / 0.5) + 0.7 * np.exp(-self.grip_dist.sum(axis=1) / 0.2)
+        progress = 0.3 * np.exp(-fetch_dist / 0.25) + 0.7 * np.exp(-self.grip_dist.sum(axis=1) / 0.2)
         lifting = gripped & over_pickup & (self.box_above < cfg.lift_height)
         stage[lifting] = 1
         # before the box leaves the table: the share of its weight the hands already carry
@@ -318,8 +319,8 @@ class SortEnv(RobotEnv):
         stand = np.where((stage < 2)[:, None], fetch_stand, self.place_xy[self.target] - goal_dir * cfg.stand_off)
         to_stand = stand - self.base_pos[:, 0:2]
         dist = np.linalg.norm(to_stand, axis=1)
-        speed = np.clip(cfg.approach_gain * dist, 0.0, cfg.speed)
-        speed[dist < 0.03] = 0.0
+        speed = np.clip(cfg.approach_gain * dist, cfg.min_speed, cfg.speed)
+        speed[dist < cfg.arrive_distance] = 0.0
         travel = np.arctan2(to_stand[:, 1], to_stand[:, 0])
         table = np.arctan2(goal_dir[:, 1], goal_dir[:, 0])
         err = wrap_to_pi(travel - self.yaw)

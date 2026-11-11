@@ -46,8 +46,8 @@ class RobotCfg:
     ]
     # arms hanging next to the body, elbows slightly bent (hiking)
     default_arm_pos = [0.15, 0.12, 0.0, -0.5, 0.15, -0.12, 0.0, -0.5]
-    # forearms pointing forward, palms facing each other (box handling)
-    carry_arm_pos = [-0.25, 0.10, 0.0, -1.35, -0.25, -0.10, 0.0, -1.35]
+    # forearms pointing forward, palms facing each other, far enough apart to pass the rim of a crate
+    carry_arm_pos = [-0.25, 0.28, 0.0, -1.35, -0.25, -0.28, 0.0, -1.35]
     init_height = 0.79          # torso height above the ground at reset [m]
     nominal_height = 0.76       # torso height when standing in the default pose [m]
     leg_action_scale = 0.3      # joint target = default + action_scale * action [rad]
@@ -310,7 +310,9 @@ class SortCfg:
 
     # walking between the tables
     speed = 0.5                     # [m/s]
-    approach_gain = 1.5             # slows down on arrival: speed = gain * distance [1/s]
+    approach_gain = 1.5             # slows down on arrival: speed = gain * distance [1/s] ...
+    min_speed = 0.3                 # ... but not below this (slower commands are easy to ignore)
+    arrive_distance = 0.05          # closer than this to where it should stand, the robot stops [m]
     max_side_speed = 0.3
     max_back_speed = 0.2
     max_yaw_rate = 1.0
