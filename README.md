@@ -12,7 +12,7 @@ from-scratch PPO implementation in PyTorch learns the controller.
 | ![Climbing 16 cm stairs](docs/stairs_up.gif) | ![Irregular stairs](docs/unseen_irregular_stairs.gif) | ![Scattered blocks](docs/unseen_blocks.gif) |
 | regular stairs, hardest level | stairs where every step has a different height and depth | randomly scattered blocks |
 
-*The bundled pretrained policy (`pretrained/biped.pt`).*
+*The bundled pretrained policy (`pretrained/biped.pt`). A 76-second video of eight scenarios - trained terrains, unseen terrains, shoves and an overloaded robot - is in [docs/showcase.mp4](docs/showcase.mp4).*
 
 Built as a reinforcement learning practice project, with the main goal of understanding
 how the robot model, environment design, rewards and training setup affect locomotion.
@@ -115,6 +115,12 @@ Save a video:
 
 ```bash
 python main.py record --terrain stairs_up --level 7 --output stairs.mp4
+```
+
+Record the captioned eight-scenario showcase video (default: pretrained policy, `docs/showcase.mp4`):
+
+```bash
+python showcase.py --model models/<run>/model_final.pt --output my_run.mp4
 ```
 
 List saved models:
@@ -241,6 +247,7 @@ sim-robot-trainer/
 ├── agent.py          actor-critic networks and the PPO algorithm
 ├── train.py          training loop, logging, checkpoints
 ├── play.py           viewer, video recording, evaluation
+├── showcase.py       captioned multi-scenario demo video
 ├── robot/biped.xml   the robot model (MJCF)
 ├── pretrained/       a trained policy to try out
 ├── docs/             images for this README

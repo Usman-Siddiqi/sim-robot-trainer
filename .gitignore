@@ -80,5 +80,6 @@ htmlcov/
 *.temp
 *.log
 *.mp4
+!docs/*.mp4
 MUJOCO_LOG.TXT
 test_gpu.py
