@@ -12,9 +12,14 @@ whole batch with vectorised numpy. The API is the usual vectorised-RL one:
     obs = env.reset()
     obs, reward, done, info = env.step(actions)     # all arrays have a leading (num_envs,) axis
 
-Task: follow a commanded forward speed and heading over flat ground and
-staircases. Finished episodes are reset automatically inside step(), and a
-curriculum moves each robot to harder / easier stairs depending on how it did.
+Task: follow a commanded forward speed and heading over flat ground, rough
+ground, staircases and slopes. Finished episodes are reset automatically inside
+step(), and a curriculum moves each robot to harder / easier tiles depending on
+how it did.
+
+So that the policy also works in conditions it was not trained in, training
+randomises the physics (friction, payload, motor strength), shoves the robots
+around and adds sensor noise - see DomainRandCfg.
 
 Action  (12): joint position offsets from the default pose, tracked by PD servos.
 Observation : base velocity, angular velocity, gravity direction, command,
@@ -22,6 +27,7 @@ Observation : base velocity, angular velocity, gravity direction, command,
               height scan of the terrain around the robot.
 """
 
+import copy
 import os
 
 import mujoco
@@ -29,7 +35,7 @@ import numpy as np
 from mujoco import rollout
 
 from config import CommandCfg, DomainRandCfg, ObsCfg, RewardCfg, RobotCfg, SimCfg, TerrainCfg
-from terrain import FLAT, Terrain, build_model
+from terrain import Terrain, build_model
 
 # sensordata layout (see <sensor> in robot/biped.xml)
 _TOUCH = slice(0, 2)
@@ -51,20 +57,26 @@ def wrap_to_pi(a):
 
 
 class BipedEnv:
-    def __init__(self, num_envs, flat_only=False, num_threads=None, seed=0,
-                 curriculum=None, fixed_level=None, terrain_proportions=None,
-                 push_robots=None, fixed_speed=None, resample_commands=True):
+    def __init__(self, num_envs, flat_only=False, num_threads=None, seed=0, terrain_rows=None,
+                 terrain_seed=0, curriculum=None, fixed_level=None, randomize=True, physics=None,
+                 push=None, fixed_speed=None, heading_offset=None, resample_commands=True):
         """
         Args:
             num_envs: number of robots simulated in parallel
-            flat_only: train on flat ground only (no stairs)
+            flat_only: flat ground only (no obstacles)
             num_threads: physics threads (default: all logical cores)
             seed: random seed
+            terrain_rows: terrain rows to build (default: TerrainCfg.rows, the training terrains)
+            terrain_seed: seed of the random parts of the terrain
             curriculum: override TerrainCfg.curriculum (False keeps levels fixed)
-            fixed_level: start every stairs robot on this level instead of the easy ones
-            terrain_proportions: override TerrainCfg.proportions
-            push_robots: override DomainRandCfg.push_robots
-            fixed_speed: always command this forward speed [m/s] (evaluation / demos)
+            fixed_level: start every robot on this level instead of the easy ones
+            randomize: training-style randomisation (physics variants, pushes, sensor noise).
+                       False gives the nominal robot without disturbances (evaluation / demos).
+            physics: fixed physical parameters, e.g. {"friction": 0.4, "payload": 5.0,
+                     "motor_strength": 0.85}; anything not given is nominal
+            push: override of the push settings, e.g. {"max_push_vel": 0.8, "push_interval_s": 3.0}
+            fixed_speed: always command this forward speed [m/s]
+            heading_offset: approach obstacles this far from square-on [rad] instead of randomly
             resample_commands: pick a new random speed / heading every few seconds
         """
         self.num_envs = int(num_envs)
@@ -72,13 +84,19 @@ class BipedEnv:
         self.dt = SimCfg.control_dt()
         self.max_episode_length = int(round(SimCfg.episode_length_s / self.dt))
         self.curriculum = TerrainCfg.curriculum if curriculum is None else curriculum
-        self.push_robots = DomainRandCfg.push_robots if push_robots is None else push_robots
         self.fixed_speed = fixed_speed
+        self.heading_offset = heading_offset
         self.resample_commands = resample_commands
+        self.obs_noise = bool(randomize and DomainRandCfg.obs_noise)
+        self.push_robots = bool(push) or bool(randomize and DomainRandCfg.push_robots)
+        push = push or {}
+        self.max_push_vel = push.get("max_push_vel", DomainRandCfg.max_push_vel)
+        self.push_interval = int(push.get("push_interval_s", DomainRandCfg.push_interval_s) / self.dt)
 
         # ------------------------------------------------------------- model
-        self.terrain = Terrain(TerrainCfg, flat_only=flat_only)
-        self.model = build_model(SimCfg, self.terrain)
+        rows = TerrainCfg.flat_rows if flat_only else (terrain_rows or TerrainCfg.rows)
+        self.terrain = Terrain(rows, TerrainCfg, seed=terrain_seed)
+        self.model = build_model(SimCfg, self.terrain)       # the nominal model (also used for rendering)
         m = self.model
         self.num_actions = m.nu
         if m.nq != 7 + m.nu or m.nv != 6 + m.nu or m.na != 0 or m.nsensordata != _NUM_SENSOR:
@@ -86,6 +104,15 @@ class BipedEnv:
         for i, name in enumerate(RobotCfg.joint_names):
             if mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_ACTUATOR, i) != name:
                 raise RuntimeError(f"actuator {i} should be '{name}'")
+
+        # physics variants: robot i is simulated with variant i % num_variants
+        if physics:
+            self.variants = [self._make_variant(**physics)]
+        elif randomize:
+            self.variants = [self._random_variant() for _ in range(DomainRandCfg.num_variants)]
+        else:
+            self.variants = [m]
+        self._models = [self.variants[i % len(self.variants)] for i in range(self.num_envs)]
 
         self.num_threads = int(num_threads or os.cpu_count() or 1)
         self._rollout = rollout.Rollout(nthread=self.num_threads)
@@ -136,17 +163,27 @@ class BipedEnv:
         self.foot_up[:, :, 2] = 1.0
         self.common_step = 0
 
-        # terrain assignment: each robot has a fixed terrain type (row) and a level that changes
-        props = np.array([1.0] if flat_only else (terrain_proportions or TerrainCfg.proportions), dtype=np.float64)
-        props = props / props.sum()
-        bounds = np.round(np.cumsum(props) * n).astype(np.int64)
+        # terrain assignment: each robot has a fixed terrain row and a level that changes
+        weights = np.array([row.get("weight", 1.0) for row in self.terrain.rows], dtype=np.float64)
+        if weights.sum() <= 0:
+            weights = (~self.terrain.row_is_flat).astype(np.float64)
+        bounds = np.round(np.cumsum(weights / weights.sum()) * n).astype(np.int64)
         self.env_row = np.searchsorted(bounds, np.arange(n), side="right").clip(0, self.terrain.num_rows - 1)
-        self.is_flat = self.terrain.kinds[self.env_row] == FLAT
+        self.is_flat = self.terrain.row_is_flat[self.env_row]
         max_level = self.terrain.num_levels - 1
         if fixed_level is not None:
             self.env_level = np.full(n, int(np.clip(fixed_level, 0, max_level)), dtype=np.int64)
         else:
             self.env_level = self.rng.integers(0, min(TerrainCfg.max_init_level, max_level) + 1, size=n)
+
+        # sensor noise amplitude for every entry of the observation
+        dr = DomainRandCfg
+        self._noise_scale = np.concatenate([
+            np.full(3, dr.noise_lin_vel * ObsCfg.lin_vel_scale), np.full(3, dr.noise_ang_vel * ObsCfg.ang_vel_scale),
+            np.full(3, dr.noise_gravity), np.zeros(3), np.full(nu, dr.noise_joint_pos),
+            np.full(nu, dr.noise_joint_vel * ObsCfg.joint_vel_scale), np.zeros(nu), np.zeros(2),
+            np.full(self.num_scan, dr.noise_height_scan * ObsCfg.height_scale),
+        ]).astype(np.float32)
 
         self.reward_weights = {k: v for k, v in RewardCfg.weights.items() if v != 0.0}
         self.episode_sums = {k: np.zeros(n) for k in self.reward_weights}
@@ -178,7 +215,7 @@ class BipedEnv:
 
         # ---- physics: all robots, all cores
         self._rollout.rollout(
-            self.model, self._datas, self.state, self._ctrl, nstep=SimCfg.decimation,
+            self._models, self._datas, self.state, self._ctrl, nstep=SimCfg.decimation,
             state=self._state_traj, sensordata=self._sensor_traj,
         )
         self.state[:] = self._state_traj[:, -1]
@@ -216,7 +253,7 @@ class BipedEnv:
             self._update_curriculum(ids, fell, reached_goal, dist)
             self._reset_envs(ids)
 
-        if self.push_robots and self.common_step % int(DomainRandCfg.push_interval_s / self.dt) == 0:
+        if self.push_robots and self.common_step % self.push_interval == 0:
             self._push()
 
         self.last_actions[:] = self.actions
@@ -237,6 +274,30 @@ class BipedEnv:
         self._rollout.close()
 
     # ============================================================ internals
+    def _make_variant(self, friction=None, payload=0.0, com_offset=(0.0, 0.0, 0.0), motor_strength=1.0):
+        """Copy of the nominal model with different physical parameters."""
+        m = copy.copy(self.model)
+        if friction is not None:
+            m.geom_friction[:, 0] = friction            # feet and ground: the contact uses the larger of the two
+        torso = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "torso")
+        scale = (m.body_mass[torso] + payload) / m.body_mass[torso]
+        m.body_mass[torso] *= scale
+        m.body_inertia[torso] *= scale
+        m.body_ipos[torso] += np.asarray(com_offset)
+        m.actuator_gainprm[:, 0] *= motor_strength      # kp
+        m.actuator_biasprm[:, 1:3] *= motor_strength    # -kp, -kd
+        m.actuator_forcerange[:] *= motor_strength
+        mujoco.mj_setConst(m, mujoco.MjData(m))
+        return m
+
+    def _random_variant(self):
+        dr, rng = DomainRandCfg, self.rng
+        return self._make_variant(
+            friction=rng.uniform(*dr.friction), payload=rng.uniform(*dr.payload),
+            com_offset=rng.uniform(-dr.com_offset, dr.com_offset, 3),
+            motor_strength=rng.uniform(*dr.motor_strength),
+        )
+
     def _update_kinematics(self):
         qpos = self.state[:, self._qpos]
         qvel = self.state[:, self._qvel]
@@ -277,12 +338,13 @@ class BipedEnv:
         x = cx + rng.uniform(-0.4, 0.4, n)
         y = cy + rng.uniform(-0.4, 0.4, n)
 
-        # heading: anywhere on flat ground, roughly square-on to the steps on stairs
+        # heading: anywhere on flat ground, towards one of the four sides of an obstacle tile
         flat = self.is_flat[ids]
-        heading = np.where(
-            flat, rng.uniform(-np.pi, np.pi, n),
-            rng.integers(0, 4, n) * (np.pi / 2) + rng.uniform(-0.25, 0.25, n),
-        )
+        if self.heading_offset is None:
+            offset = rng.uniform(-CommandCfg.heading_noise, CommandCfg.heading_noise, n)
+        else:
+            offset = self.heading_offset * rng.choice([-1.0, 1.0], n)
+        heading = np.where(flat, rng.uniform(-np.pi, np.pi, n), rng.integers(0, 4, n) * (np.pi / 2) + offset)
         yaw = np.where(flat, rng.uniform(-np.pi, np.pi, n), heading + rng.uniform(-0.3, 0.3, n))
         self.heading_target[ids] = wrap_to_pi(heading)
 
@@ -312,11 +374,11 @@ class BipedEnv:
 
     def _push(self):
         """Random horizontal shove so the policy learns to recover its balance."""
-        v = DomainRandCfg.max_push_vel
+        v = self.max_push_vel
         self.state[:, self._qvel][:, 0:2] += self.rng.uniform(-v, v, (self.num_envs, 2))
 
     def _update_curriculum(self, ids, fell, reached_goal, dist):
-        """Stairs robots: climbed/descended the whole staircase -> harder level, fell -> easier."""
+        """Obstacle robots: crossed the whole tile -> harder level, fell or got stuck -> easier."""
         if not self.curriculum or self.terrain.num_levels == 1:
             return
         ids = ids[~self.is_flat[ids]]
@@ -408,17 +470,22 @@ class BipedEnv:
             np.sin(phase), np.cos(phase),
             np.clip(scan, -1.0, 1.0) * ObsCfg.height_scale,
         ], axis=1)
-        return np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+        obs = np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+        if self.obs_noise:
+            obs += self._noise_scale * self.rng.uniform(-1.0, 1.0, obs.shape).astype(np.float32)
+        return obs
 
     def _episode_stats(self, ids, fell, reached_goal):
         stats = {f"reward/{k}": float(v[ids].mean()) for k, v in self.episode_sums.items()}
         stats["episode_length"] = float(self.episode_length[ids].mean())
         stats["fell"] = float(fell[ids].mean())
-        stairs = ids[~self.is_flat[ids]]
-        if stairs.size:
-            stats["stairs_success"] = float(reached_goal[stairs].mean())
+        obstacle = ids[~self.is_flat[ids]]
+        if obstacle.size:
+            stats["success"] = float(reached_goal[obstacle].mean())
         if not self.is_flat.all():
             stats["terrain_level"] = float(self.env_level[~self.is_flat].mean())
+            for row in np.unique(self.env_row[~self.is_flat]):
+                stats[f"level/{row}_{self.terrain.row_names[row]}"] = float(self.env_level[self.env_row == row].mean())
         return stats
 
 

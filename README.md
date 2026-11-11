@@ -1,14 +1,18 @@
 # Sim Robot Trainer
 
-Teaches a simulated two-legged robot to walk and climb stairs with reinforcement learning (PPO).
+Teaches a simulated two-legged robot to walk, climb stairs and cross rough terrain with reinforcement learning (PPO) - and checks that it still works in places it was never trained in.
 
 Thousands of robots are simulated in parallel with [MuJoCo](https://mujoco.org/), a
-terrain curriculum moves them from flat ground to taller and taller stairs, and a
+terrain curriculum moves them from flat ground to taller stairs and steeper slopes,
+the physics is randomised so the controller cannot overfit to one simulator setup, and a
 from-scratch PPO implementation in PyTorch learns the controller.
 
-![The trained biped climbing 16 cm stairs](docs/stairs_up.gif)
+| Trained on | Never trained on | Never trained on |
+| --- | --- | --- |
+| ![Climbing 16 cm stairs](docs/stairs_up.gif) | ![Irregular stairs](docs/unseen_irregular_stairs.gif) | ![Scattered blocks](docs/unseen_blocks.gif) |
+| regular stairs, hardest level | stairs where every step has a different height and depth | randomly scattered blocks |
 
-*The bundled pretrained policy climbing the hardest stairs (16 cm steps).*
+*The bundled pretrained policy (`pretrained/biped.pt`).*
 
 Built as a reinforcement learning practice project, with the main goal of understanding
 how the robot model, environment design, rewards and training setup affect locomotion.
@@ -16,7 +20,8 @@ how the robot model, environment design, rewards and training setup affect locom
 ## What it does
 
 - **12-DoF biped** (`robot/biped.xml`): hip yaw / roll / pitch, knee, ankle pitch / roll per leg, ~25 kg, PD position servos with torque limits
-- **Tasks**: follow a commanded speed and heading on flat ground, climb stairs up, walk stairs down (step heights 3 cm → 16 cm over 10 curriculum levels)
+- **Tasks**: follow a commanded speed and heading over flat and rough ground, stairs up and down (3 cm → 16 cm steps, random tread depth) and slopes up and down (up to 22°), each in 10 curriculum levels
+- **Generalisation**: training randomises friction, payload, motor strength, sensor noise and shoves; `python main.py eval` then tests the policy on 11 terrain types and 6 physical conditions that are never used in training
 - **Fast**: physics for all robots is stepped by MuJoCo's multi-threaded rollout on every CPU core, the neural networks run on the GPU
 - **Tools**: interactive viewer, video export, evaluation table, TensorBoard logging, resumable checkpoints
 
@@ -67,10 +72,10 @@ It should print `device: cuda (NVIDIA GeForce RTX 4050 ...)`. If it says `cpu`, 
 Watch the bundled pretrained policy climb stairs (no training needed):
 
 ```bash
-python main.py play --model pretrained/biped_stairs.pt
+python main.py play --model pretrained/biped.pt
 ```
 
-Train the full task (flat ground + stairs up + stairs down):
+Train the full task (flat + rough ground, stairs and slopes, with randomised physics):
 
 ```bash
 python main.py train
@@ -88,19 +93,23 @@ Stop any time with `Ctrl+C` (the policy is saved) and continue later:
 python main.py train --resume
 ```
 
-Watch your newest model, choosing terrain, stairs level (0-9) and speed:
+Watch your newest model, choosing terrain, difficulty level (0-9) and speed:
 
 ```bash
 python main.py play --terrain stairs_up --level 7 --speed 0.6
 ```
 
+`--terrain` takes the training terrains (`flat`, `rough`, `stairs_up`, `stairs_down`, `slope_up`, `slope_down`) and the held-out test terrains (`irregular_stairs_up`, `irregular_stairs_down`, `steep_stairs_up`, `steep_stairs_down`, `landing_stairs_up`, `ramp_then_stairs`, `scattered_blocks`, `waves`, `steep_slope_up`, `steep_slope_down`, `very_rough`).
+
 In the viewer: `UP`/`DOWN` change the speed, `LEFT`/`RIGHT` turn, `BACKSPACE` restarts the episode.
 
-Measure how good a model is (success rate per terrain and stairs level):
+Measure how good a model is, on the training terrains and on terrains / physics it has never seen:
 
 ```bash
 python main.py eval
 ```
+
+Use `--suite trained` or `--suite unseen` for one half only, and `--num_envs` to trade accuracy for time.
 
 Save a video:
 
@@ -129,17 +138,18 @@ The defaults in `config.py` are chosen for this laptop:
 
 What to expect (one iteration = 2048 robots x 24 steps = 49,152 simulation steps):
 
-| Iterations | Steps | What the robot can do |
+| Iterations | Steps | What the robots can do |
 | --- | --- | --- |
-| ~100 | 5 M | stays upright and starts stepping |
-| ~150 | 7 M | walks on flat ground at the commanded speed |
-| ~400 | 20 M | climbs 10 cm steps |
-| ~500 | 25 M | first successful climbs of the hardest (16 cm) stairs |
-| ~800 | 40 M | 99-100 % success on every terrain and level |
+| ~100 | 5 M | stay upright and walk on flat ground, still falling fairly often |
+| ~150 | 7 M | cross the easiest obstacles (3-5 cm steps, gentle slopes) |
+| ~300 | 15 M | mid-level obstacles (10 cm steps, 13° slopes) |
+| ~400 | 20 M | the first robots finish the hardest levels |
+| ~850 | 42 M | 96-98 % of obstacle tiles crossed, 3 % falls (with shoves, noise and randomised physics on) |
+| ~1200 | 59 M | 99-100 % on the training terrains, and the unseen-condition results listed below |
 
-These numbers are from an actual run of `python main.py train` with the default settings and seed. That run was done on a 4-core cloud CPU without a GPU (about 4.5 s per iteration, one hour to iteration 800); the 8845HS has four times the threads and much faster cores, and the 4050 takes the PPO update off the CPU, so expect it to be several times faster. `python main.py bench` tells you the simulation speed on your machine.
+These numbers are from an actual run of `python main.py train` with the default settings and seed. That run was done on a 4-core cloud CPU without a GPU (about 5 s per iteration, roughly two hours for 1200 iterations); the 8845HS has four times the threads and much faster cores, and the 4050 takes the PPO update off the CPU, so expect it to be several times faster. `python main.py bench` tells you the simulation speed on your machine.
 
-The default run length is 1500 iterations; the extra iterations after ~800 only make the gait smoother. Stop early with `Ctrl+C` whenever `python main.py eval` looks good enough.
+The default run length is 1500 iterations. Stop early with `Ctrl+C` whenever `python main.py eval` looks good enough.
 
 Tips:
 
@@ -154,35 +164,65 @@ Tips:
 tensorboard --logdir logs
 ```
 
-Useful curves: `train/mean_return`, `episode/terrain_level` (curriculum progress), `episode/stairs_success`, `episode/fell` and the individual reward terms under `episode/reward/*`.
+Useful curves: `train/mean_return`, `episode/terrain_level` (curriculum progress, also per terrain under `episode/level/*`), `episode/success`, `episode/fell` and the individual reward terms under `episode/reward/*`.
 
 The console prints one line every 10 iterations (this one is from the 4-core CPU-only reference run):
 
 ```text
-it   800/2000 |  11,588 steps/s (sim  1.9s, learn  2.3s) | return   18.41 | ep len  431.1 | fell 0.00 | stairs lvl 6.05 ok 1.00 | std 0.32 | lr 2e-04 | eta  96.8 min
+it  1000/1500 |  10,190 steps/s (sim  2.6s, learn  2.3s) | return   16.46 | ep len  414.7 | fell 0.02 | level 5.98 ok 0.99 | std 0.36 | lr 2e-04 | eta  55.6 min
 ```
 
-`stairs lvl` is the average curriculum level of the stairs robots (0 = 3 cm steps, 9 = 16 cm steps) and `ok` is the fraction of stairs episodes that reached the end of the staircase. Because robots that beat level 9 are sent back to a random level, a policy that has mastered the stairs hovers around level 6 with `ok` near 1.00. Episodes on stairs end as soon as the robot reaches the goal, so `return` and `ep len` are lower than on flat ground - that is expected.
+`level` is the average curriculum level of the robots on obstacle tiles (0 = easiest, 9 = hardest) and `ok` is the fraction of their episodes that crossed the whole tile. Because robots that beat level 9 are sent back to a random level, a policy that has mastered everything hovers around level 6 with `ok` near 1.00. Episodes on obstacle tiles end as soon as the robot reaches the goal, so `return` and `ep len` are lower than on flat ground - that is expected.
 
-## Pretrained policy
+## Pretrained policy and how well it generalises
 
-`pretrained/biped_stairs.pt` is the result of `python main.py train` (default settings, seed 0) stopped at iteration 1000 (49 million steps). `python main.py eval --model pretrained/biped_stairs.pt --num_envs 4000`:
+`pretrained/biped.pt` is the result of `python main.py train` (default settings, seed 0) stopped at iteration 1200 (59 million steps). All numbers below come from `python main.py eval --model pretrained/biped.pt` (2000 robots per test, one episode each, exploration noise off). Success means crossing the whole obstacle tile, or on flat ground not falling for the full 20 s.
 
-| Terrain | Step height | Success | Fell |
+**Training terrains** (nominal robot): 100 % on flat, rough, stairs up, stairs down, slope up and slope down, at every level.
+
+**Unseen terrains** - generators or parameter ranges that are never used in training:
+
+| Terrain | What is new about it | Success | Hardest level |
 | --- | --- | --- | --- |
-| flat | - | 100 % | 0 % |
-| stairs up, levels 0-9 | 3.0 - 16.0 cm | 99 - 100 % | 0 - 1 % |
-| stairs down, levels 0-9 | 3.0 - 16.0 cm | 99 - 100 % | 0 - 1 % |
+| irregular stairs up / down | every step has its own random height and depth | 100 % / 100 % | 100 % / 100 % |
+| steep stairs up / down | 25 cm treads, steps up to 18 cm (training: 26-40 cm, up to 16 cm) | 100 % / 99 % | 100 % / 89 % |
+| stairs with landings | flights of three steps with 90 cm landings | 100 % | 100 % |
+| ramp then stairs | a slope that turns into a staircase | 100 % | 100 % |
+| scattered blocks | random blocks up to 13 cm to step on and off | 99 % | 100 % |
+| waves | rolling hills, up to 35 cm peak to peak | 100 % | 100 % |
+| steep slope up / down | up to 27° (training: up to 22°) | 100 % / 100 % | 100 % / 100 % |
+| very rough | bumps up to 12 cm (training: up to 8 cm) | 100 % | 100 % |
 
-Success means walking for the full 20 s on flat ground, or getting all the way up / down the 8-step staircase. The average speed tracking error is 0.04 - 0.07 m/s. You can also continue training from it: `python main.py train --resume pretrained/biped_stairs.pt`.
+**Unseen conditions** - the training terrains (all levels) with physics or commands outside the training ranges:
+
+| Condition | Training range | Success | Fell |
+| --- | --- | --- | --- |
+| slippery, friction 0.4 | 0.5 - 1.25 | 94 % | 6 % |
+| heavy payload, +6 kg | -1 to +3 kg | 100 % | 0 % |
+| weak motors, 80 % | 90 - 110 % | 100 % | 0 % |
+| hard shoves, 0.8 m/s every 3 s | 0.5 m/s every 5 s | 96 % | 4 % |
+| diagonal approach, 45° | up to 29° | 100 % | 0 % |
+| all at once: friction 0.45, +5 kg, 85 % motors, 0.6 m/s shoves | - | 93 % | 7 % |
+
+The remaining failures are concentrated where physics runs out: on slippery ground the robot still does stairs and rough ground at 100 %, and slopes up to 0.28 (16°) at 97-100 %. It manages the 0.32 slope about 80 % of the time and slides on the two steepest ones (0.36 and 0.40), which are at 90-100 % of the friction coefficient of 0.4 - no controller can walk on those.
+
+**What randomisation bought.** The first version of this project was trained without it (one staircase shape, friction 1.0, light shoves only). The same test suite on that policy: 91 % and 84 % on steep stairs / steep slopes going down (now 99 % and 100 %), 77 % under hard shoves (now 96 %), 90 % on slippery ground (now 94 %) and 84 % with everything at once (now 93 %).
+
+**Limits.** "Unseen" here means unseen terrain shapes and physical parameters inside the same simulator. It is evidence that the policy did not memorise its training set, not a guarantee for anything arbitrary: gaps, stepping stones, steps much taller than 18 cm, or a real robot are outside what was tested.
+
+You can also continue training from the pretrained policy: `python main.py train --resume pretrained/biped.pt`.
 
 ## How it works
 
 **Robot.** `robot/biped.xml` is a MuJoCo model with a floating torso and two 6-joint legs. The policy outputs 12 joint position targets (offsets from a slightly crouched default pose) at 50 Hz; PD servos inside the simulator turn them into torques at 200 Hz.
 
-**Terrain.** `terrain.py` builds a grid of 10 m tiles: flat ground, "pit" stairs the robot must climb out of, and "pyramid" stairs it must walk down, each at 10 difficulty levels. All robots share one world but each lives in its own copy of the physics state, so they never collide with each other.
+**Terrain.** `terrain.py` builds a grid of 10 m tiles, one row per terrain type and one column per difficulty level: flat ground, rough ground, "pit" stairs and slopes the robot must climb out of, and "pyramid" stairs and slopes it must walk down. Stairs are built from boxes, smooth shapes from height fields, and a height raster of the whole world answers terrain queries for all robots at once. All robots share one world but each lives in its own copy of the physics state, so they never collide with each other.
 
-**Curriculum.** A stairs robot that reaches the end of its staircase is moved to the next harder level; one that falls is moved down. Robots that beat the hardest level are sent to a random level.
+**Curriculum.** A robot that crosses its whole tile is moved to the next harder level; one that falls or gets stuck is moved down. Robots that beat the hardest level are sent to a random level.
+
+**Domain randomisation.** So that the policy does not memorise one exact simulator, training uses 32 variants of the robot with different friction (0.5-1.25), payload (-1 to +3 kg), centre of mass and motor strength (90-110 %), shoves every robot every 5 s, adds noise to every sensor reading, gives every staircase a different tread depth (26-40 cm) and approaches obstacles up to 29° off square-on. All ranges are in `DomainRandCfg`.
+
+**Testing generalisation.** `EvalCfg` in `config.py` defines conditions that are deliberately kept out of training: terrain generators the policy never sees (irregular stairs, stairs with landings, a ramp that turns into stairs, scattered blocks, rolling waves) or parameters beyond the training range (25 cm treads with 18 cm steps, 27° slopes, 12 cm bumps), and physics outside the randomisation ranges (friction 0.4, +6 kg payload, 80 % motors, 0.8 m/s shoves, 45° approach, and several of these at once). `python main.py eval` runs all of them. If you add something from `EvalCfg` to training, it stops being a test of generalisation - add a new held-out case instead.
 
 **Observation (105 numbers).** Base linear and angular velocity, gravity direction, the velocity command, joint positions and velocities, the previous action, a gait clock (sin/cos), and a 11x5 height scan of the terrain around the robot.
 
@@ -212,7 +252,7 @@ sim-robot-trainer/
 
 - **`device: cpu` on a machine with an NVIDIA GPU**: reinstall PyTorch from the CUDA index (see Setup), and update the NVIDIA driver.
 - **The viewer window does not open**: update your graphics driver; on Linux a desktop session is required. `python main.py record` works without a window.
-- **Robots never get past low stairs levels**: train longer, or look at `episode/reward/*` in TensorBoard to see which term dominates.
+- **Robots never get past low levels**: train longer, look at `episode/level/*` in TensorBoard to see which terrain is the bottleneck and at `episode/reward/*` to see which reward term dominates.
 - **Changed the observation or the robot?** Old checkpoints will not fit any more; start a fresh run.
 
 ## Repository

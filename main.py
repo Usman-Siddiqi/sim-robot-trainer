@@ -8,7 +8,7 @@ Command line entry point of sim-robot-trainer.
     python main.py train                 train on flat ground + stairs (the full task)
     python main.py train --flat          train on flat ground only (quick sanity check)
     python main.py play                  watch the newest trained model in the viewer
-    python main.py eval                  success rate on every terrain / stairs level
+    python main.py eval                  success rates, including terrains and physics it never trained on
     python main.py record --output walk.mp4
     python main.py bench                 how fast is the simulation on this machine?
     python main.py list                  list saved models
@@ -23,7 +23,7 @@ import time
 
 from config import MODEL_SAVE_PATH, PPOCfg
 
-PRETRAINED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pretrained", "biped_stairs.pt")
+PRETRAINED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pretrained", "biped.pt")
 
 
 def list_models(models_dir=MODEL_SAVE_PATH):
@@ -101,7 +101,10 @@ def main():
 
     def add_scene_args(p):
         p.add_argument("--model", default=None, help="checkpoint (default: newest, else pretrained)")
-        p.add_argument("--terrain", default="stairs_up", choices=["flat", "stairs_up", "stairs_down"])
+        p.add_argument("--terrain", default="stairs_up", metavar="NAME",
+                       help="a training terrain (flat, rough, stairs_up, stairs_down, slope_up, slope_down) "
+                            "or a held-out test terrain (irregular_stairs_up, scattered_blocks, waves, ... "
+                            "see EvalCfg in config.py)")
         p.add_argument("--level", type=int, default=5, help="stairs difficulty level 0-9")
         p.add_argument("--speed", type=float, default=0.6, help="commanded forward speed [m/s]")
         p.add_argument("--seed", type=int, default=0)
@@ -116,7 +119,9 @@ def main():
 
     p = sub.add_parser("eval", help="measure success rates of a trained policy")
     p.add_argument("--model", default=None)
-    p.add_argument("--num_envs", type=int, default=1000)
+    p.add_argument("--suite", default="all", choices=["all", "trained", "unseen"],
+                   help="trained = training terrains, unseen = held-out terrains and conditions")
+    p.add_argument("--num_envs", type=int, default=2000, help="robots per test")
     p.add_argument("--device", default="auto")
     p.add_argument("--threads", type=int, default=None)
 
@@ -147,7 +152,7 @@ def main():
                seconds=args.seconds, seed=args.seed)
     elif args.command == "eval":
         from play import evaluate
-        evaluate(resolve_model(args.model), args.num_envs, args.device, args.threads)
+        evaluate(resolve_model(args.model), args.num_envs, args.device, args.threads, suite=args.suite)
     elif args.command == "bench":
         bench(args.num_envs, args.threads)
     elif args.command == "list":

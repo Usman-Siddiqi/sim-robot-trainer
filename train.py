@@ -88,11 +88,15 @@ def train(num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_iterations, flat_o
             ppo.optimizer.load_state_dict(ckpt["optimizer"])
             ppo.lr = ckpt.get("learning_rate", ppo.lr)
         start_iteration = ckpt.get("iteration", 0)
-        # carry the stairs curriculum over (resampled, so num_envs may differ between runs)
-        levels = ckpt.get("terrain_levels")
-        if levels and not flat_only and ckpt.get("task") == task:
-            stairs = ~env.is_flat
-            env.env_level[stairs] = np.random.default_rng(seed).choice(levels, int(stairs.sum()))
+        # carry the terrain curriculum over (resampled per terrain, so num_envs may differ between runs)
+        levels, names = ckpt.get("terrain_levels"), ckpt.get("terrain_level_names")
+        if levels and names and not flat_only:
+            rng = np.random.default_rng(seed)
+            levels, names = np.array(levels), np.array(names)
+            for row, name in enumerate(env.terrain.row_names):
+                ids = np.nonzero(env.env_row == row)[0]
+                if ids.size and (names == name).any() and not env.terrain.row_is_flat[row]:
+                    env.env_level[ids] = rng.choice(levels[names == name], ids.size)
         print(f"Resumed from {resume} (iteration {start_iteration})")
     else:
         policy = ActorCritic(env.num_obs, env.num_actions)
@@ -103,8 +107,10 @@ def train(num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_iterations, flat_o
 
     def checkpoint(name, iteration):
         path = os.path.join(run_dir, name)
-        levels = env.env_level[~env.is_flat].tolist()
-        save_checkpoint(path, policy, ppo, iteration, {"task": task, "terrain_levels": levels})
+        obstacle = ~env.is_flat
+        extra = {"task": task, "terrain_levels": env.env_level[obstacle].tolist(),
+                 "terrain_level_names": [env.terrain.row_names[r] for r in env.env_row[obstacle]]}
+        save_checkpoint(path, policy, ppo, iteration, extra)
         return path
 
     obs = torch.from_numpy(env.reset()).to(device)
@@ -172,8 +178,8 @@ def train(num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_iterations, flat_o
                         f"(sim {t1 - t0:4.1f}s, learn {t2 - t1:4.1f}s) | return {mean_return:7.2f} "
                         f"| ep len {mean_length:6.1f} | fell {means.get('fell', 0.0):4.2f}")
                 if "terrain_level" in means:
-                    line += (f" | stairs lvl {means['terrain_level']:4.2f}"
-                             f" ok {means.get('stairs_success', 0.0):4.2f}")
+                    line += (f" | level {means['terrain_level']:4.2f}"
+                             f" ok {means.get('success', 0.0):4.2f}")
                 line += f" | std {losses['noise_std']:4.2f} | lr {losses['learning_rate']:.0e} | eta {eta / 60:5.1f} min"
                 print(line, flush=True)
             if iteration % PPOCfg.save_interval == 0:

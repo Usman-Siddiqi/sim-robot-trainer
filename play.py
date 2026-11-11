@@ -19,24 +19,32 @@ import numpy as np
 import torch
 
 from agent import get_device, load_policy
-from config import TerrainCfg
+from config import EvalCfg, TerrainCfg
 from environment import BipedEnv
 
-TERRAINS = ["flat", "stairs_up", "stairs_down"]
+
+def terrain_names():
+    """All terrain names that can be shown: the training terrains first, then the held-out ones."""
+    names = []
+    for row in TerrainCfg.rows + EvalCfg.unseen_terrains:
+        if row["name"] not in names:
+            names.append(row["name"])
+    return names
 
 
 def _single_env(policy_path, terrain, level, speed, device, seed):
-    """One robot on one chosen terrain, no curriculum, no random pushes."""
-    if terrain not in TERRAINS:
-        raise ValueError(f"terrain must be one of {TERRAINS}")
+    """One nominal robot on one chosen terrain: no curriculum, no pushes, no sensor noise."""
+    rows = [r for r in TerrainCfg.rows + EvalCfg.unseen_terrains if r["name"] == terrain]
+    if not rows:
+        raise ValueError(f"unknown terrain '{terrain}', choose from {terrain_names()}")
     device = get_device(device)
-    policy, ckpt = load_policy(policy_path, device)
+    policy, _ = load_policy(policy_path, device)
     policy.eval()
-    flat_only = terrain == "flat" and ckpt.get("task") == "flat"
-    props = [float(t == terrain) for t in TerrainCfg.types]
-    env = BipedEnv(num_envs=1, flat_only=flat_only, num_threads=1, seed=seed, curriculum=False,
-                   fixed_level=level, terrain_proportions=None if flat_only else props,
-                   push_robots=False, fixed_speed=speed, resample_commands=False)
+    flat = dict(TerrainCfg.flat_rows[0], weight=0.0)
+    env = BipedEnv(num_envs=1, flat_only=terrain == "flat", num_threads=1, seed=seed,
+                   terrain_rows=[flat, dict(rows[0], weight=1.0)], terrain_seed=seed,
+                   curriculum=False, fixed_level=level, randomize=False,
+                   fixed_speed=speed, resample_commands=False)
     if policy.num_obs != env.num_obs:
         raise ValueError(f"{policy_path} was trained with a different observation size")
     return env, policy, device
@@ -147,32 +155,17 @@ def record(policy_path, output="walk.mp4", terrain="stairs_up", level=5, speed=0
     return outcome
 
 
-def evaluate(policy_path, num_envs=1000, device="auto", num_threads=None, seed=123, verbose=True):
-    """
-    Run one full episode per robot with the deterministic policy and report, for
-    every terrain type and stairs level, how often the robot fell / succeeded.
-
-    Returns a dict: results[terrain][level] = {"success", "fell", "speed_error", "n"}
-    (flat ground uses level 0 and counts surviving the whole episode as success).
-    """
-    device = get_device(device)
-    policy, ckpt = load_policy(policy_path, device)
-    policy.eval()
-    flat_only = ckpt.get("task") == "flat"
-    env = BipedEnv(num_envs=num_envs, flat_only=flat_only, num_threads=num_threads, seed=seed,
-                   curriculum=False, push_robots=False,
-                   terrain_proportions=None if flat_only else [0.1, 0.45, 0.45])
-    stairs = np.nonzero(~env.is_flat)[0]
-    env.env_level[stairs] = np.arange(stairs.size) % env.terrain.num_levels
+def _run_episodes(policy, env, device):
+    """One episode per robot with the deterministic policy -> (success, fell, speed error) per robot."""
+    for row in np.unique(env.env_row[~env.is_flat]):            # spread each row evenly over the levels
+        ids = np.nonzero(env.env_row == row)[0]
+        env.env_level[ids] = np.arange(ids.size) % env.terrain.num_levels
     env.env_level[env.is_flat] = 0
     obs = env.reset()
-
-    running = np.ones(num_envs, dtype=bool)         # still in its first episode
-    success = np.zeros(num_envs, dtype=bool)
-    fell = np.zeros(num_envs, dtype=bool)
-    speed_err = np.zeros(num_envs)
-    steps = np.zeros(num_envs)
-    levels = env.env_level.copy()
+    n = env.num_envs
+    running = np.ones(n, dtype=bool)                            # still in its first episode
+    success, fell = np.zeros(n, dtype=bool), np.zeros(n, dtype=bool)
+    speed_err, steps = np.zeros(n), np.zeros(n)
     for _ in range(env.max_episode_length + 1):
         cmd_speed = env.commands[:, 0].copy()
         actions = policy.act_inference(torch.from_numpy(obs).to(device))
@@ -186,25 +179,93 @@ def evaluate(policy_path, num_envs=1000, device="auto", num_threads=None, seed=1
         running &= ~done
         if not running.any():
             break
-    env.close()
+    return success, fell, speed_err / np.maximum(steps, 1)
 
+
+def _per_terrain(env, levels, success, fell):
+    """Aggregate per terrain name -> {"levels": [success per level], "success", "fell", "n"}."""
+    out = {}
+    for name in dict.fromkeys(env.terrain.row_names):
+        rows = [r for r, row_name in enumerate(env.terrain.row_names) if row_name == name]
+        mask = np.isin(env.env_row, rows)
+        if not mask.any():
+            continue
+        if env.terrain.row_is_flat[rows[0]]:
+            per_level = [float(success[mask].mean())]
+        else:
+            per_level = [float(success[mask & (levels == lv)].mean()) for lv in range(env.terrain.num_levels)]
+        out[name] = {"levels": per_level, "success": float(success[mask].mean()),
+                     "fell": float(fell[mask].mean()), "n": int(mask.sum())}
+    return out
+
+
+def _print_terrain_table(title, table, num_levels):
+    print(f"\n{title}")
+    header = " ".join(f"L{lv:<3}" for lv in range(num_levels))
+    print(f"  {'terrain':<24} {'success':>7} {'fell':>5}   success per level: {header}")
+    for name, r in table.items():
+        cells = " ".join(f"{v * 100:3.0f} " for v in r["levels"]) if len(r["levels"]) > 1 else "(no levels)"
+        print(f"  {name:<24} {r['success']:>7.0%} {r['fell']:>5.0%}                      {cells}")
+
+
+def evaluate(policy_path, num_envs=2000, device="auto", num_threads=None, seed=123, suite="all", verbose=True):
+    """
+    Test a policy with exploration noise switched off, one episode per robot.
+
+    suite "trained":  the training terrains with the nominal robot
+    suite "unseen":   held-out conditions the policy never trained on (EvalCfg):
+                      new terrain types, and the training terrains with physics
+                      or commands outside the training ranges
+    suite "all":      both
+
+    Success = crossing the whole obstacle tile (or, on flat ground, not falling
+    for a whole episode). Returns a dict with all numbers.
+    """
+    device = get_device(device)
+    policy, _ = load_policy(policy_path, device)
+    policy.eval()
+    common = dict(num_envs=num_envs, num_threads=num_threads, seed=seed, curriculum=False)
     results = {}
-    for row, name in enumerate(["flat"] if flat_only else TerrainCfg.types):
-        results[name] = {}
-        for level in range(env.terrain.num_levels if name != "flat" else 1):
-            mask = (env.env_row == row) & (levels == level)
-            if mask.any():
-                results[name][level] = {
-                    "success": float(success[mask].mean()), "fell": float(fell[mask].mean()),
-                    "speed_error": float((speed_err[mask] / np.maximum(steps[mask], 1)).mean()),
-                    "n": int(mask.sum()),
-                }
     if verbose:
-        print(f"\nEvaluation of {policy_path}  ({num_envs} robots, one episode each, no exploration noise)")
-        print(f"{'terrain':<12} {'level':>5} {'step [cm]':>9} {'success':>8} {'fell':>6} {'speed err [m/s]':>16} {'robots':>7}")
-        for name, per_level in results.items():
-            for level, r in per_level.items():
-                step_cm = "-" if name == "flat" else f"{env.terrain.step_heights[level] * 100:.1f}"
-                print(f"{name:<12} {level:>5} {step_cm:>9} {r['success']:>8.0%} {r['fell']:>6.0%} "
-                      f"{r['speed_error']:>16.2f} {r['n']:>7}")
+        print(f"Evaluating {policy_path}  ({num_envs} robots per test, one episode each, no exploration noise)")
+
+    if suite in ("trained", "all"):
+        env = BipedEnv(randomize=False, **common)
+        success, fell, _ = _run_episodes(policy, env, device)
+        results["trained"] = _per_terrain(env, env.env_level.copy(), success, fell)
+        if verbose:
+            _print_terrain_table("TRAINING TERRAINS (nominal robot)", results["trained"], env.terrain.num_levels)
+        env.close()
+
+    if suite in ("unseen", "all"):
+        env = BipedEnv(randomize=False, terrain_rows=EvalCfg.unseen_terrains, terrain_seed=seed, **common)
+        success, fell, _ = _run_episodes(policy, env, device)
+        results["unseen_terrains"] = _per_terrain(env, env.env_level.copy(), success, fell)
+        if verbose:
+            _print_terrain_table("UNSEEN TERRAINS (never used in training)", results["unseen_terrains"],
+                                 env.terrain.num_levels)
+        env.close()
+
+        results["unseen_conditions"] = {}
+        names = list(dict.fromkeys(row["name"] for row in TerrainCfg.rows))
+        if verbose:
+            print("\nUNSEEN CONDITIONS (training terrains, physics / commands outside the training ranges)")
+            print(f"  success, all levels          {'condition':<14}" + "".join(f"{n:>12}" for n in names)
+                  + f"{'overall':>9} {'fell':>5}")
+        for cond in EvalCfg.unseen_conditions:
+            env = BipedEnv(randomize=False, physics=cond.get("physics"), push=cond.get("push"),
+                           heading_offset=cond.get("heading_offset"), **common)
+            success, fell, _ = _run_episodes(policy, env, device)
+            r = {"overall": float(success.mean()), "fell": float(fell.mean()),
+                 "per_terrain": _per_terrain(env, env.env_level.copy(), success, fell)}
+            results["unseen_conditions"][cond["name"]] = r
+            if verbose:
+                cells = "".join(f"{r['per_terrain'][n]['success']:>12.0%}" for n in names)
+                print(f"  {cond['name']:<43}{cells}{r['overall']:>9.0%} {r['fell']:>5.0%}")
+            env.close()
+
+    if verbose and "unseen_terrains" in results:
+        avg = np.mean([r["success"] for r in results["unseen_terrains"].values()])
+        cond = np.mean([r["overall"] for r in results["unseen_conditions"].values()])
+        print(f"\nSummary: {avg:.0%} average success on unseen terrains, {cond:.0%} under unseen conditions")
     return results
