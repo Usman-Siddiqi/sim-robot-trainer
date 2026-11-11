@@ -66,18 +66,6 @@ def make_env(task, **kwargs):
     raise ValueError(f"unknown task '{task}' (hike or sort)")
 
 
-def find_latest_model(models_dir=MODEL_SAVE_PATH):
-    """Most recently written checkpoint under models_dir (searched recursively), or None."""
-    newest, newest_time = None, -1.0
-    for root, _, files in os.walk(models_dir):
-        for f in files:
-            if f.endswith(".pt"):
-                path = os.path.join(root, f)
-                if os.path.getmtime(path) > newest_time:
-                    newest, newest_time = path, os.path.getmtime(path)
-    return newest
-
-
 def train(task="hike", num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_iterations, flat_only=False,
           device="auto", num_threads=None, resume=None, run_name=None, seed=0,
           save_path=MODEL_SAVE_PATH, log_path=LOG_PATH, init_from=None):
