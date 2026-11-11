@@ -366,7 +366,7 @@ class PPOCfg:
     transfer_arm_std = 0.6          # exploration noise of the arm joints after the transfer
 
     # bookkeeping
-    save_interval = 100             # iterations between checkpoints
+    save_interval = 50              # iterations between checkpoints
     log_interval = 10               # iterations between console prints
 
 
