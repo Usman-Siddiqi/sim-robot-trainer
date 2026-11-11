@@ -59,7 +59,8 @@ class Tile:
         self.x = -cfg.tile_length / 2 + (np.arange(self.nx) + 0.5) * cfg.cell
         self.y = -cfg.tile_width / 2 + (np.arange(self.ny) + 0.5) * cfg.cell
         self.height = np.zeros((self.nx, self.ny))      # top of every rock column (0 = no rock)
-        self.path_y = np.zeros(self.nx)                 # centre of the trail at every x
+        self.path_y = np.zeros(self.nx)                 # where to walk at every x (the stones, on stepping stones)
+        self.path_center = np.zeros(self.nx)            # smooth centre line of the trail
         self.path_elev = np.zeros(self.nx)              # nominal height of the trail
         self.path_hw = np.full(self.nx, 1e3)            # half width of the trail
         self.boxes = []                                 # (x0, x1, y0, y1, top)
@@ -311,6 +312,7 @@ def make_trail(row, t, rng, cfg=HikeCfg):
 
     known = ~np.isnan(b.path_y)
     tile.path_y = np.interp(np.arange(nx), np.nonzero(known)[0], b.path_y[known])
+    tile.path_center = b.center.copy()
     tile.path_elev = np.minimum(b.elev_left, b.elev_right)
     tile.path_hw = b.half_width.copy()
     tile.merge_boxes(cfg)
@@ -360,13 +362,22 @@ class Terrain:
         self.path_y = np.stack([tile.path_y for tile in self.tiles])
         self.path_elev = np.stack([tile.path_elev for tile in self.tiles])
         self.path_hw = np.stack([tile.path_hw for tile in self.tiles])
-        # index of the path point `lookahead` metres (along the path) ahead of every column
+        # index of the path point `lookahead` metres (along the trail) ahead of every column, and the
+        # direction in which the trail runs there (of the smooth centre line: stepping stones zigzag,
+        # but the robot should keep facing along the trail and step sideways)
         self.look_index = np.zeros_like(self.path_y, dtype=np.int64)
+        self.path_heading = np.zeros_like(self.path_y)
         nx = self.path_x.size
-        for k in range(self.num_tiles):
-            step = np.hypot(np.diff(self.path_x), np.diff(self.path_y[k]))
+        for k, tile in enumerate(self.tiles):
+            center = tile.path_center
+            step = np.hypot(np.diff(self.path_x), np.diff(center))
             arc = np.concatenate([[0.0], np.cumsum(step)])
-            self.look_index[k] = np.clip(np.searchsorted(arc, arc + cfg.lookahead), 0, nx - 1)
+            look = np.clip(np.searchsorted(arc, arc + cfg.lookahead), 0, nx - 1)
+            self.look_index[k] = look
+            ahead = np.minimum(np.arange(nx) + 1, nx - 1)
+            look = np.maximum(look, ahead)
+            dx = np.maximum(self.path_x[look] - self.path_x, 1e-6)
+            self.path_heading[k] = np.where(look > np.arange(nx), np.arctan2(center[look] - center, dx), 0.0)
 
     # ------------------------------------------------------------------ queries
     def height(self, tile, x, y):

@@ -79,7 +79,7 @@ class HikeCfg:
     trail of that row is assembled from (see terrain.py). The held-out test
     trails live in EvalCfg below.
     """
-    episode_length_s = 25.0
+    episode_length_s = 30.0         # enough to finish a trail at the slowest commanded speed
     tile_length = 12.0              # along the trail (x) [m]
     tile_width = 8.0                # across (y) [m]
     cell = 0.125                    # trails are built from square rock columns of this size [m]
@@ -123,7 +123,7 @@ class HikeCfg:
     # in an arc. On flat ground half of the robots practise exactly that with random directions, the
     # other half gets random velocity commands (forwards / backwards, sideways, turning on the spot),
     # so the policy can move in any direction - the sorting task builds on that.
-    speed = [0.4, 0.9]              # commanded walking speed [m/s]
+    speed = [0.5, 0.9]              # commanded walking speed [m/s]
     max_side_speed = 0.3            # [m/s]
     max_back_speed = 0.3            # [m/s]
     max_yaw_rate = 1.0              # [rad/s]

@@ -142,12 +142,16 @@ class HikeEnv(RobotEnv):
         to_x = terrain.path_x[look] - x
         to_y = terrain.path_y[tile, look] - y
         trail_dir = np.where(to_x > 0.05, np.arctan2(to_y, np.maximum(to_x, 1e-6)), 0.0)
-        err = wrap_to_pi(np.where(self.is_flat, self.move_dir, trail_dir) - self.yaw)
-        # keep walking while turning (an arc), drift sideways a little to get onto the line faster
-        ahead = np.cos(err)
+        # walk towards the point ahead on the trail, but face the way the trail runs: a robot that is
+        # beside the line (or has to get onto the next stepping stone) steps sideways instead of turning
+        move_err = wrap_to_pi(np.where(self.is_flat, self.move_dir, trail_dir) - self.yaw)
+        face_err = wrap_to_pi(np.where(self.is_flat, self.move_dir, terrain.path_heading[tile, self.column]) - self.yaw)
+        ahead = np.cos(move_err)
+        # keep walking while turning (an arc)
         self.commands[:, 0] = self.speed * np.maximum(ahead, cfg.min_turn_speed)
-        self.commands[:, 1] = np.clip(self.speed * np.sin(err) * np.maximum(ahead, 0.0), -cfg.max_side_speed, cfg.max_side_speed)
-        self.commands[:, 2] = np.clip(cfg.heading_gain * err, -cfg.max_yaw_rate, cfg.max_yaw_rate) * (self.speed > 0)
+        self.commands[:, 1] = np.clip(self.speed * np.sin(move_err) * (ahead > 0), -cfg.max_side_speed, cfg.max_side_speed)
+        self.commands[:, 2] = np.clip(cfg.heading_gain * face_err, -cfg.max_yaw_rate, cfg.max_yaw_rate) * (self.speed > 0)
+        err = face_err
         self.commands[self.velocity_mode] = self.velocity_cmd[self.velocity_mode]
         self.heading_err = err * ~self.velocity_mode * (self.speed > 0)
         self.standing = (np.abs(self.commands) < GaitCfg.stand_speed).all(axis=1)
