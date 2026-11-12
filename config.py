@@ -288,9 +288,20 @@ class RewardCfg:
     arm_swing = 0.35                # how far each arm swings against the opposite leg at full speed [rad]
     arm_swing_speed = 0.8           # ... "full speed" [m/s]; slower walking, smaller swing
 
+    # Where the arms may be without a penalty, as (lowest, highest) offset from the relaxed pose [rad]. Inside
+    # these ranges the arms are free (swing, balance, reach for a rail); outside they cost. Without this the
+    # policy clamps its upper arms against the trunk and folds the forearms up, bracing against its own body.
+    # (For the right arm the sideways and twist ranges are mirrored.)
+    arm_free_range = {
+        "shoulder_roll": (-0.08, 1.0),      # hardly any further in than relaxed, far out to the side
+        "shoulder_yaw": (-0.35, 0.35),
+        "elbow": (-0.7, 0.5),               # bent up to about 70 degrees, or stretched
+    }
+
     hands_clear = 0.215             # palms closer than this to the body's middle plane count as tucked in [m]
 
     hike = {
+        "arm_posture": -6.0,        # arm joints outside their free range (see arm_free_range)
         "hands_in": -15.0,          # palms pressed against the thighs / trunk. Bracing the arms against its own
                                     # body lets the arm motors help the legs: a cheat, and it pins the arms down
         "arm_swing": 1.0,           # arms swinging against the legs, like people walk. Only the shoulders'

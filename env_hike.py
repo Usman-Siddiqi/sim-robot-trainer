@@ -91,6 +91,15 @@ class HikeEnv(RobotEnv):
         ]).astype(np.float32)
         self._shoulder_pitch = np.array([RobotCfg.joint_names.index("l_shoulder_pitch"),
                                          RobotCfg.joint_names.index("r_shoulder_pitch")])
+        # free range of every arm joint around the relaxed pose (mirrored for the right arm)
+        lower, upper = np.full(nu, -np.inf), np.full(nu, np.inf)
+        for joint, (lo, hi) in RewardCfg.arm_free_range.items():
+            left, right = RobotCfg.joint_names.index("l_" + joint), RobotCfg.joint_names.index("r_" + joint)
+            mirrored = joint != "elbow"
+            lower[left], upper[left] = self.default_joint_pos[left] + lo, self.default_joint_pos[left] + hi
+            lower[right] = self.default_joint_pos[right] + (-hi if mirrored else lo)
+            upper[right] = self.default_joint_pos[right] + (-lo if mirrored else hi)
+        self._arm_lower, self._arm_upper = lower, upper
         self._init_rewards({**RewardCfg.common, **RewardCfg.hike})
 
     # ---------------------------------------------------------------- task
@@ -250,7 +259,9 @@ class HikeEnv(RobotEnv):
             * np.sin(2.0 * np.pi * self._leg_phase()[:, 0])
         target = self.default_joint_pos[self._shoulder_pitch] + np.stack([-swing, swing], axis=1)
         arm_err = ((self.joint_pos[:, self._shoulder_pitch] - target) ** 2).sum(axis=1)
+        outside = np.clip(self._arm_lower - self.joint_pos, 0.0, None) + np.clip(self.joint_pos - self._arm_upper, 0.0, None)
         return {
+            "arm_posture": (outside ** 2).sum(axis=1),
             "hands_in": self._hands_in().sum(axis=1),
             "arm_swing": np.exp(-arm_err / 0.1) * ~self.standing,
             "tracking_lin_vel": np.exp(-lin_err / sigma),

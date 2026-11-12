@@ -262,7 +262,7 @@ def load_policy(path, device):
     return policy.to(device), data
 
 
-def transfer_policy(path, num_obs, num_actions, device, arm_slice=None, arm_std=None):
+def transfer_policy(path, num_obs, num_actions, device, arm_slice=None, arm_std=None, reset_arms=False):
     """
     Start a new policy from one trained on another task whose observation is the first part of
     the new one (the sorting observation starts with the hiking observation).
@@ -282,6 +282,11 @@ def transfer_policy(path, num_obs, num_actions, device, arm_slice=None, arm_std=
         first[:, :k] = state.pop("0.weight")
         policy.actor[0].bias.copy_(state.pop("0.bias"))
         policy.actor.load_state_dict(state, strict=False)
+        if reset_arms and arm_slice is not None:
+            # a different task has a different use for the arms: forget what the old policy did with them,
+            # so that they start out in the new task's own relaxed pose
+            policy.actor[-1].weight[arm_slice] = 0.0
+            policy.actor[-1].bias[arm_slice] = 0.0
         policy.log_std.copy_(old.log_std)
         if arm_slice is not None and arm_std is not None:
             policy.log_std[arm_slice] = torch.clamp(policy.log_std[arm_slice], min=float(torch.tensor(arm_std).log()))

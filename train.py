@@ -113,8 +113,10 @@ def train(task="hike", num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_itera
     start_iteration = 0
     warmup = 0
     if init_from and not resume:
+        other_task = torch.load(init_from, map_location="cpu", weights_only=True).get("task", "hike") != task
         policy, source = transfer_policy(init_from, env.num_obs, env.num_actions, device,
-                                         arm_slice=slice(RobotCfg.num_leg_joints, None), arm_std=PPOCfg.transfer_arm_std)
+                                         arm_slice=slice(RobotCfg.num_leg_joints, None), arm_std=PPOCfg.transfer_arm_std,
+                                         reset_arms=other_task)
         ppo = PPO(policy, num_envs, device)
         warmup = PPOCfg.critic_warmup
         if source.get("task") == task and source.get("curriculum") and not flat_only:
