@@ -101,7 +101,7 @@ class SortEnv(RobotEnv):
     timestep, decimation = SortCfg.timestep, SortCfg.decimation
     default_arm_pos = RobotCfg.carry_arm_pos
     progress_keys = (("sorted", "sorted"), ("stage", "stage"), ("drop", "dropped"), ("wrong", "wrong_table"),
-                     ("guided", "guided"), ("kg", "max_box_mass"))
+                     ("guided", "guided"), ("alone", "sorted_unguided"), ("kg", "max_box_mass"))
 
     def __init__(self, num_envs, num_threads=None, seed=0, randomize=True, physics=None, push=None,
                  box_mass=None, start_near=None, guide=0.0, mass_level=None):
@@ -442,19 +442,25 @@ class SortEnv(RobotEnv):
         self.mass_level = int(state.get("mass_level", self.mass_level))
 
     def on_iteration(self, iteration, stats):
-        """Add a heavier box / withdraw the guide a little whenever the robots do well enough."""
+        """Add a heavier box / withdraw the guide a little when the robots do well enough - slowly, and the
+        guide comes back when they stop delivering: a curriculum that runs ahead of the robots undoes their progress."""
         cfg = SortCfg
-        if iteration % cfg.guide_every:
-            return
-        if self.mass_level < self.box_masses.size and stats.get("sorted", 0.0) >= cfg.mass_threshold:
+        sorted_boxes = stats.get("sorted", 0.0)
+        if iteration % cfg.mass_every == 0 and self.mass_level < self.box_masses.size and sorted_boxes >= cfg.mass_threshold:
             self.mass_level += 1
-        elif self.guide_probability > 0.0 and stats.get("sorted", 0.0) >= cfg.guide_threshold:
-            self.guide_probability = max(0.0, round(self.guide_probability - cfg.guide_step, 4))
+        if iteration % cfg.guide_every == 0:
+            if sorted_boxes >= cfg.guide_threshold:
+                self.guide_probability = max(0.0, round(self.guide_probability - cfg.guide_step, 4))
+            elif sorted_boxes < cfg.guide_back_off:
+                self.guide_probability = min(1.0, round(self.guide_probability + cfg.guide_step, 4))
 
     def _episode_stats(self, ids, info):
         stats = super()._episode_stats(ids, info)
         stats["guided"] = self.guide_probability
         stats["sorted"] = float(self.sorted_count[ids].mean())
+        own = ids[~self.guided[ids]]
+        if own.size:
+            stats["sorted_unguided"] = float(self.sorted_count[own].mean())
         stats["stage"] = float(self.max_stage[ids].mean())
         stats["dropped"] = float(self.drop_count[ids].mean())
         stats["wrong_table"] = float(self.wrong_count[ids].mean())

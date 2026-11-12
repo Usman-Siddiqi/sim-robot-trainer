@@ -386,9 +386,11 @@ class SortCfg:
     # only see the colour of the box and where the three coloured tables are - until no robot
     # is guided any more and the policy does the sorting by itself.
     guide_start = 1.0               # share of guided robots at the start of training
-    guide_step = 0.05               # ... is reduced by this much
-    guide_every = 10                # ... every so many iterations
-    guide_threshold = 1.0           # ... while robots sort at least this many boxes per episode on average
+    guide_step = 0.02               # ... changes by this much
+    guide_every = 10                # ... every so many iterations:
+    guide_threshold = 1.0           # down while robots sort at least this many boxes per episode on average,
+    guide_back_off = 0.6            # back up when they sort fewer than this (the guide was withdrawn too fast)
+    mass_every = 30                 # a heavier box is added at most this often [iterations]
 
     # How much each stage is worth: the score at its start, and how much progress within it adds. Carrying is
     # worth the most by far - otherwise a robot that holds a crate just above the table and stays there earns
