@@ -271,7 +271,7 @@ class SortEnv(RobotEnv):
         left = np.stack([-np.sin(self.yaw), np.cos(self.yaw), np.zeros(n)], axis=1)
         reach = np.abs((left * bx).sum(1)) * hx + np.abs((left * by).sum(1)) * hy + np.abs((left * bz).sum(1)) * hz
         depth = np.abs((fwd * bx).sum(1)) * hx + np.abs((fwd * by).sum(1)) * hy + np.abs((fwd * bz).sum(1)) * hz
-        middle = self.box_pos + bz * (hz - cfg.rim_thickness - 0.055)[:, None]
+        middle = self.box_pos + bz * (hz - cfg.rim_thickness - 0.05)[:, None]      # (a palm is 10 cm tall)
         dist = []
         for k, side in enumerate((1.0, -1.0)):
             rel = self.grip_pos[:, k] - middle

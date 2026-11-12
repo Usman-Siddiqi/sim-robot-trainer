@@ -354,7 +354,8 @@ class SortCfg:
     # exact elliptic cone and a stiff palm contact, which cost five times as much to simulate.)
     elliptic_cone = False
     impratio = 1.0
-    palm_friction = 1.6
+    palm_friction = 0.3             # palms against the SIDES of a crate: slippery on purpose. A crate squeezed
+                                    # between the palms slowly slides down; it has to hang on its rim
     palm_solreffriction = [0.02, 1.0]
     palm_solimp = [0.9, 0.95, 0.001, 0.5, 2.0]
 
@@ -362,7 +363,7 @@ class SortCfg:
     grip_along = 0.05               # the palms belong within this distance of the middle of the crate's sides [m]
     max_tilt = 0.06                 # a lifted crate tilted by more than about 20 degrees earns no progress
     grip_distance = 0.09            # a box counts as gripped while both palms are this close to their place on its sides [m]
-    lift_height = 0.08              # a box counts as picked up when it is this far above the table [m]
+    lift_height = 0.05              # a box counts as picked up when it is this far above the table [m]
     place_margin = 0.07             # a placed box must be at least this far inside the table edge [m]
     place_hold_s = 0.3              # ... lie still for this long
     release_distance = 0.14         # ... with both palms at least this far from their place on its sides [m]
