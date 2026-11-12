@@ -325,9 +325,8 @@ class SortCfg:
     has to hold them up and lean back against the load by feel.
     """
     episode_length_s = 30.0
-    # smaller physics steps than hiking: the stiff palm-crate contact below needs them
-    timestep = 0.005
-    decimation = 4
+    timestep = 0.010                # physics as for hiking: two 10 ms steps per decision
+    decimation = 2
     colors = [("red", (0.86, 0.22, 0.20)), ("green", (0.22, 0.66, 0.30)), ("blue", (0.20, 0.42, 0.90))]
     shuffle_colors = True           # which table has which colour changes every episode
     table_height = 0.70             # [m]
@@ -350,15 +349,14 @@ class SortCfg:
     box_friction = 1.0
     rim_width = 0.06                # the rim sticks out this far beyond the left and right side [m]
     rim_thickness = 0.02
-    # Contact model. With MuJoCo's default (pyramidal, soft) friction a squeezed box creeps out of the
-    # hands within seconds. So: the exact elliptic friction cone everywhere, and a stiff, grippy
-    # contact between the palms and the box. (A high global impratio would also stop the creep,
-    # but it changes how the feet grip the floor and the hiking policy starts to stumble.)
-    elliptic_cone = True
-    impratio = 2.0
+    # Contact model: MuJoCo's default (pyramidal friction cone), as for hiking. A crate hangs on the palms by
+    # its rim, so it does not depend on friction. (Smooth boxes squeezed between the palms did: they needed the
+    # exact elliptic cone and a stiff palm contact, which cost five times as much to simulate.)
+    elliptic_cone = False
+    impratio = 1.0
     palm_friction = 1.6
-    palm_solreffriction = [0.01, 1.0]
-    palm_solimp = [0.98, 0.99, 0.001, 0.5, 2.0]
+    palm_solreffriction = [0.02, 1.0]
+    palm_solimp = [0.9, 0.95, 0.001, 0.5, 2.0]
 
     stand_off = 0.37                # torso <-> box distance for picking up / putting down [m]
     grip_along = 0.05               # the palms belong within this distance of the middle of the crate's sides [m]
