@@ -48,9 +48,11 @@ HIKE = [
          physics=dict(payload=5.0, motor_strength=0.85), push=dict(max_push_vel=0.6, push_interval_s=4.0)),
 ]
 SORT = [
-    dict(title="Sorting boxes by colour", sub="each box goes to the table of its colour", tag="TRAINED", seed=0),
-    dict(title="Sorting boxes by colour", sub="another round: colours and weights are random", tag="TRAINED", seed=5),
-    dict(title="Boxes heavier than any in training", sub="6.5 - 8 kg (training: 1.5 - 6 kg)",
+    dict(title="Sorting crates by colour", sub="each crate goes to the table of its colour; weights 0.5 - 6 kg, unknown to the robot",
+         tag="TRAINED", seed=0),
+    dict(title="Sorting crates by colour", sub="another round: colours, weights and which table has which colour are random",
+         tag="TRAINED", seed=5),
+    dict(title="Crates heavier than any in training", sub="6.5 - 8 kg (training: up to 6 kg; the robot weighs 28.5 kg)",
          tag="NEVER SEEN IN TRAINING", seed=2, box_mass=(6.5, 8.0)),
 ]
 
