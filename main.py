@@ -15,6 +15,7 @@ Command line entry point of sim-robot-trainer. There are two tasks:
     python main.py eval  --task hike        success rates, including conditions it never trained in
     python main.py record --task sort --output sort.mp4
     python main.py bench --task hike        how fast is the simulation on this machine?
+    python main.py distill                  sort: take the guide away from a policy (see distill.py)
     python main.py watch                    follow the progress of the training that is running
     python main.py list                     list saved models
 
@@ -178,6 +179,14 @@ def main():
     p.add_argument("--num_envs", type=int, default=PPOCfg.num_envs)
     p.add_argument("--threads", type=int, default=None)
 
+    p = sub.add_parser("distill", help="sort: take the guide away from a policy by letting it teach a copy of itself")
+    p.add_argument("--teacher", default=None, help="sorting checkpoint that works with the guide (default: your newest)")
+    p.add_argument("--output", default=None, help="default: models/sort_distilled/model_final.pt")
+    p.add_argument("--iterations", type=int, default=300)
+    p.add_argument("--num_envs", type=int, default=PPOCfg.num_envs)
+    p.add_argument("--device", default="auto")
+    p.add_argument("--threads", type=int, default=None)
+
     p = sub.add_parser("watch", help="follow the progress of the training that is running")
     p.add_argument("--models_dir", default=MODEL_SAVE_PATH)
 
@@ -213,6 +222,9 @@ def main():
             evaluate(model, args.num_envs, args.device, args.threads, suite=args.suite)
     elif args.command == "bench":
         bench(args.task, args.num_envs, args.threads)
+    elif args.command == "distill":
+        from distill import distill
+        distill(resolve_model(args.teacher, "sort"), args.output, args.num_envs, args.iterations, args.device, args.threads)
     elif args.command == "watch":
         watch(args.models_dir)
     elif args.command == "list":
