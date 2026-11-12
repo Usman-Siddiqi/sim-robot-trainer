@@ -23,7 +23,7 @@ positions / velocities, previous action, gait clock, velocity command, a
 import numpy as np
 
 from config import DomainRandCfg, EvalCfg, GaitCfg, HikeCfg, ObsCfg, RewardCfg, RobotCfg, SimCfg
-from env_base import RobotEnv, wrap_to_pi
+from env_base import RobotEnv, quat_rotate_inverse, wrap_to_pi
 from terrain import Terrain
 
 
@@ -97,6 +97,15 @@ class HikeEnv(RobotEnv):
     def _ground(self, x, y):
         tile = self.env_scene.reshape((-1,) + (1,) * (np.ndim(x) - 1))
         return self.terrain.height(tile, x, y)
+
+    def _hands_in(self):
+        """How far each palm is inside the width of the body (pressed against a thigh or the trunk) -> (N, 2) [m]."""
+        side = np.stack([quat_rotate_inverse(self.base_quat, self.grip_pos[:, k] - self.base_pos)[:, 1] for k in (0, 1)], axis=1)
+        return np.clip(RewardCfg.hands_clear - np.abs(side), 0.0, 0.1)
+
+    def _palm_obs(self):
+        """Contact force on the palms from the world - a palm resting against the robot's own body does not count."""
+        return super()._palm_obs() * (self._hands_in() == 0.0)
 
     def _ground_normal(self):
         """Which way the ground under each foot tilts, so that "foot flat" means flat on the slope."""
@@ -223,6 +232,7 @@ class HikeEnv(RobotEnv):
         target = self.default_joint_pos[self._shoulder_pitch] + np.stack([-swing, swing], axis=1)
         arm_err = ((self.joint_pos[:, self._shoulder_pitch] - target) ** 2).sum(axis=1)
         return {
+            "hands_in": self._hands_in().sum(axis=1),
             "arm_swing": np.exp(-arm_err / 0.1) * ~self.standing,
             "tracking_lin_vel": np.exp(-lin_err / sigma),
             "tracking_ang_vel": np.exp(-(cmd[:, 2] - self.base_ang_vel[:, 2]) ** 2 / RewardCfg.tracking_sigma_yaw),
