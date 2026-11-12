@@ -68,7 +68,9 @@ def train(task="hike", num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_itera
         device: "auto", "cuda" or "cpu" for the neural networks
         num_threads: physics threads (default: all logical cores)
         resume: checkpoint to continue from
-        init_from: sort only: hiking policy to start from (the sorting robot already knows how to walk)
+        init_from: a hiking policy to start from instead of from scratch. Sorting always starts that
+                   way (the sorting robot already knows how to walk); for hiking it carries an older
+                   policy over after the observation changed
         run_name: name of the run directory (default: timestamp)
     Returns:
         path of the final checkpoint
@@ -98,15 +100,20 @@ def train(task="hike", num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_itera
     start_iteration = 0
     warmup = 0
     if init_from and not resume:
-        policy, _ = transfer_policy(init_from, env.num_obs, env.num_actions, device,
-                                    arm_slice=slice(RobotCfg.num_leg_joints, None), arm_std=PPOCfg.transfer_arm_std)
+        policy, source = transfer_policy(init_from, env.num_obs, env.num_actions, device,
+                                         arm_slice=slice(RobotCfg.num_leg_joints, None), arm_std=PPOCfg.transfer_arm_std)
         ppo = PPO(policy, num_envs, device)
         warmup = PPOCfg.critic_warmup
+        if source.get("task") == task and source.get("curriculum") and not flat_only:
+            env.load_curriculum(source["curriculum"], np.random.default_rng(seed))     # same task: keep its levels
         print(f"Starting from the policy {init_from}")
     elif resume:
         policy, ckpt = load_policy(resume, device)
-        if policy.num_obs != env.num_obs or policy.num_actions != env.num_actions:
-            raise ValueError(f"{resume} does not fit the '{task}' task (it was trained for '{ckpt.get('task', '?')}')")
+        if policy.num_obs != env.num_obs or policy.num_actions != env.num_actions \
+                or ckpt.get("obs_layout", 1) != env.obs_layout:
+            raise ValueError(f"{resume} does not fit the '{task}' task as it is now (it was trained for "
+                             f"'{ckpt.get('task', '?')}' with observation layout {ckpt.get('obs_layout', 1)}). "
+                             f"A hiking policy can still be used as a starting point: --init-from {resume}")
         ppo = PPO(policy, num_envs, device)
         if "optimizer" in ckpt:
             ppo.optimizer.load_state_dict(ckpt["optimizer"])
@@ -125,7 +132,7 @@ def train(task="hike", num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_itera
 
     def checkpoint(name, iteration):
         path = os.path.join(run_dir, name)
-        extra = {"task": task, "curriculum": env.curriculum_state()}
+        extra = {"task": task, "curriculum": env.curriculum_state(), "obs_layout": env.obs_layout}
         save_checkpoint(path, policy, ppo, iteration, extra)
         return path
 

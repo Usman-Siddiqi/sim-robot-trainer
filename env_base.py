@@ -59,6 +59,7 @@ class RobotEnv:
     """Base class. Subclasses build the scenes and define the task (commands, rewards, resets)."""
 
     episode_length_s = 20.0
+    obs_layout = 2              # raised whenever the meaning of the observation changes (stored in checkpoints)
     default_arm_pos = RobotCfg.default_arm_pos
 
     def __init__(self, num_envs, num_threads=None, seed=0, randomize=True, physics=None, push=None):
@@ -399,6 +400,10 @@ class RobotEnv:
         phase = (self.episode_length * self.dt / GaitCfg.period) % 1.0
         return np.stack([phase, (phase + 0.5) % 1.0], axis=1)
 
+    def _ground_normal(self):
+        """Horizontal part of the ground's upward normal under each foot -> (N, 2, 2). Flat ground: zero."""
+        return 0.0
+
     def _foot_terrain(self):
         """Highest terrain point under / just ahead of each foot -> (N, 2)."""
         c, s = np.cos(self.yaw)[:, None, None], np.sin(self.yaw)[:, None, None]
@@ -432,7 +437,7 @@ class RobotEnv:
         d = self.foot_pos[:, 0, 0:2] - self.foot_pos[:, 1, 0:2]                  # left - right
         lateral = -np.sin(self.yaw) * d[:, 0] + np.cos(self.yaw) * d[:, 1]
         terms["feet_distance"] = np.clip(cfg.min_feet_distance - lateral, 0.0, None)
-        terms["foot_flat"] = (self.foot_up[:, :, 0:2] ** 2).sum(axis=(1, 2))
+        terms["foot_flat"] = ((self.foot_up[:, :, 0:2] - self._ground_normal()) ** 2).sum(axis=(1, 2))
         terms["feet_slip"] = ((self.foot_vel[:, :, 0:2] ** 2).sum(axis=2) * self.contact).sum(axis=1)
 
         # --- effort / smoothness
@@ -477,6 +482,10 @@ class RobotEnv:
             np.full(3, dr.noise_gravity), np.full(nu, dr.noise_joint_pos),
             np.full(nu, dr.noise_joint_vel * ObsCfg.joint_vel_scale), np.zeros(nu), np.zeros(2),
         ]
+
+    def _palm_obs(self):
+        """How hard each palm presses on something (scaled) -> (N, 2)."""
+        return np.clip(self.palm_touch / 20.0, 0.0, 3.0)
 
     def _finish_obs(self, parts):
         obs = np.nan_to_num(np.concatenate(parts, axis=1), nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)

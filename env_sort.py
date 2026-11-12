@@ -173,12 +173,13 @@ class SortEnv(RobotEnv):
         self.guided = np.zeros(n, dtype=bool)
 
         self.num_scan = len(HikeCfg.scan_x) * len(HikeCfg.scan_y)
-        self.num_obs = 71 + 3 + self.num_scan + (3 + 6 + 3 + 3 + 3 + 6 + 2 + 2 + 6 + 1)
+        self.num_obs = 71 + 3 + self.num_scan + 2 + (3 + 6 + 3 + 3 + 3 + 6 + 2 + 6 + 1)
         noise = DomainRandCfg.noise_object_pos
         self._noise_scale = np.concatenate(self._proprioception_noise() + [
             np.zeros(3), np.full(self.num_scan, DomainRandCfg.noise_height_scan * ObsCfg.height_scale),
+            np.full(2, DomainRandCfg.noise_palm_touch),
             np.full(3, noise), np.full(6, 0.02), np.full(3, 0.05), np.full(3, 0.005), np.zeros(3),
-            np.full(6, noise), np.zeros(2), np.full(2, noise), np.full(6, noise), np.zeros(1),
+            np.full(6, noise), np.full(2, noise), np.full(6, noise), np.zeros(1),
         ]).astype(np.float32)
         weights = {**RewardCfg.common, **cfg.rewards}
         self._init_rewards(weights)
@@ -413,13 +414,13 @@ class SortEnv(RobotEnv):
         return self._finish_obs(self._proprioception() + [
             self.commands * self.guided[:, None],
             np.clip(scan, -1.0, 1.0) * ObsCfg.height_scale,
+            self._palm_obs(),
             self._heading_frame(box_pos - base),
             self._heading_frame(bx), self._heading_frame(by),
             self._heading_frame(box_vel - self.base_lin_vel_world),
             self.box_half * 4.0,
             color,
             self._heading_frame(self.grip_pos[:, 0] - base), self._heading_frame(self.grip_pos[:, 1] - base),
-            np.clip(self.palm_touch / 20.0, 0.0, 3.0),
             self._heading_frame(self.table_xy[0][None, :] - base[:, 0:2]),
             *tables,
             np.clip(self.sorted_count[:, None] / 4.0, 0.0, 2.0),

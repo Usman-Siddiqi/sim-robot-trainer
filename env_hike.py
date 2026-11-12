@@ -4,18 +4,20 @@ env_hike.py
 Author: Usman Siddiqi
 
 Task 1 - hiking. The robot follows a winding mountain trail (see terrain.py):
-rock steps of different heights, stepping stones with gaps, narrow ridges,
-boulders to get around. A small navigation layer turns "where does the trail go"
-into a velocity command (forward speed, sideways speed, turning rate); the
-policy has to realise that command with its 20 joints while looking at a height
-scan of the ground ahead, and its arms are free to swing for balance.
+slopes up, down and sideways, rock steps, stepping stones with gaps, narrow
+ridges and beams, roots and logs to step over, walls, gates and rocks to get
+around. A small navigation layer turns "where does the trail go" into a velocity
+command (forward speed, sideways speed, turning rate); the policy has to realise
+that command with its 20 joints while looking at a height scan of the ground
+ahead. Its arms swing with the gait, are free to move for balance, and it feels
+when a palm touches something (a wall to lean on, the ground when it stumbles).
 
 Leaving the trail, falling into a gap or falling over ends the episode. A
 curriculum moves each robot to harder / easier trails depending on how it did.
 
-Observation (218): base velocity, angular velocity, gravity direction, joint
-positions / velocities, previous action, gait clock, velocity command and a
-16 x 9 height scan.
+Observation (220): base velocity, angular velocity, gravity direction, joint
+positions / velocities, previous action, gait clock, velocity command, a
+16 x 9 height scan and the contact force on the two palms.
 """
 
 import numpy as np
@@ -78,10 +80,13 @@ class HikeEnv(RobotEnv):
         sx, sy = np.meshgrid(np.array(cfg.scan_x), np.array(cfg.scan_y), indexing="ij")
         self._scan_x, self._scan_y = sx.ravel(), sy.ravel()
         self.num_scan = self._scan_x.size
-        self.num_obs = 71 + 3 + self.num_scan
+        self.num_obs = 71 + 3 + self.num_scan + 2
         self._noise_scale = np.concatenate(self._proprioception_noise() + [
             np.zeros(3), np.full(self.num_scan, DomainRandCfg.noise_height_scan * ObsCfg.height_scale),
+            np.full(2, DomainRandCfg.noise_palm_touch),
         ]).astype(np.float32)
+        self._shoulder_pitch = np.array([RobotCfg.joint_names.index("l_shoulder_pitch"),
+                                         RobotCfg.joint_names.index("r_shoulder_pitch")])
         self._init_rewards({**RewardCfg.common, **RewardCfg.hike})
 
     # ---------------------------------------------------------------- task
@@ -92,6 +97,16 @@ class HikeEnv(RobotEnv):
     def _ground(self, x, y):
         tile = self.env_scene.reshape((-1,) + (1,) * (np.ndim(x) - 1))
         return self.terrain.height(tile, x, y)
+
+    def _ground_normal(self):
+        """Which way the ground under each foot tilts, so that "foot flat" means flat on the slope."""
+        x, y, d = self.foot_pos[:, :, 0], self.foot_pos[:, :, 1], 0.06
+        gx = (self._ground(x + d, y) - self._ground(x - d, y)) / (2 * d)
+        gy = (self._ground(x, y + d) - self._ground(x, y - d)) / (2 * d)
+        grad = np.stack([gx, gy], axis=2)
+        # a height difference of more than a 30 degree slope is an edge (a step, a root), not a slope
+        grad[np.abs(grad).max(axis=2) > 0.6] = 0.0
+        return -grad / np.sqrt(1.0 + (grad ** 2).sum(axis=2, keepdims=True))
 
     def _reset_envs(self, ids):
         n, rng, cfg, terrain = ids.size, self.rng, HikeCfg, self.terrain
@@ -202,7 +217,13 @@ class HikeEnv(RobotEnv):
     def _task_terms(self, fell):
         cmd, sigma = self.commands, RewardCfg.tracking_sigma
         lin_err = (cmd[:, 0] - self.base_lin_vel[:, 0]) ** 2 + (cmd[:, 1] - self.base_lin_vel[:, 1]) ** 2
+        # arms swing against the legs: the left arm is in front while the right leg is (and vice versa)
+        swing = RewardCfg.arm_swing * np.clip(np.abs(cmd[:, 0]) / RewardCfg.arm_swing_speed, 0.0, 1.0) \
+            * np.sin(2.0 * np.pi * self._leg_phase()[:, 0])
+        target = self.default_joint_pos[self._shoulder_pitch] + np.stack([-swing, swing], axis=1)
+        arm_err = ((self.joint_pos[:, self._shoulder_pitch] - target) ** 2).sum(axis=1)
         return {
+            "arm_swing": np.exp(-arm_err / 0.1) * ~self.standing,
             "tracking_lin_vel": np.exp(-lin_err / sigma),
             "tracking_ang_vel": np.exp(-(cmd[:, 2] - self.base_ang_vel[:, 2]) ** 2 / RewardCfg.tracking_sigma_yaw),
             "heading": 0.5 * (1.0 + np.cos(self.heading_err)),
@@ -214,7 +235,7 @@ class HikeEnv(RobotEnv):
         py = self.base_pos[:, 1:2] + s * self._scan_x + c * self._scan_y
         scan = self.base_pos[:, 2:3] - RobotCfg.nominal_height - self._ground(px, py)
         return self._finish_obs(self._proprioception() + [
-            self.commands, np.clip(scan, -1.0, 1.0) * ObsCfg.height_scale,
+            self.commands, np.clip(scan, -1.0, 1.0) * ObsCfg.height_scale, self._palm_obs(),
         ])
 
     def _episode_stats(self, ids, info):

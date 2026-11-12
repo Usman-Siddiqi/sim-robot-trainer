@@ -112,18 +112,32 @@ class HikeCfg:
     gate_offset = (0.15, 0.5)       # openings are this far left / right of the middle of the trail [m]
     obstacle_clearance = (0.6, 0.4) # free space between a rock in the trail and the line to walk [m]
 
+    # slopes
+    slope = (0.08, 0.42)            # ramps up / down: rise per metre (0.42 = 23 degrees)
+    bank_slope = (0.06, 0.36)       # trail tilted sideways, gullies and crests
+    stone_tilt = (0.0, 0.22)        # stepping stones lie crooked by up to this much
+    # things to trip over / step over
+    root_height = (0.02, 0.10)      # roots: low and thin [m]
+    log_height = (0.06, 0.26)       # logs [m]
+    cobble_height = (0.03, 0.10)    # loose stones [m]
+    cobble_density = (0.03, 0.12)   # share of the trail covered by them
+    beam_half_width = (0.5, 0.125)  # half the width of a balance beam [m]
+
     _everything = ["rough", "steps", "steps_up", "steps_down", "stones", "ridge", "boulders",
-                   "canyon", "gates", "obstacles", "ledge"]
+                   "canyon", "gates", "obstacles", "ledge", "ramp_up", "ramp_down", "bank", "gully", "crest",
+                   "roots", "logs", "cobbles", "beam"]
     rows = [
-        dict(name="flat", kind="flat", weight=0.16),
-        dict(name="rocky", kind="trail", weight=0.11, sections=["rough", "steps", "flat"]),
-        dict(name="climb", kind="trail", weight=0.11, sections=["steps_up", "steps_up", "steps_down", "steps_down", "flat"]),
-        dict(name="stones", kind="trail", weight=0.12, sections=["stones", "stones", "flat", "rough"]),
-        dict(name="ridge", kind="trail", weight=0.10, sections=["ridge", "boulders", "ridge", "rough"]),
-        dict(name="walls", kind="trail", weight=0.14, sections=["canyon", "gates", "obstacles", "ledge", "rough"]),
+        dict(name="flat", kind="flat", weight=0.12),
+        dict(name="rocky", kind="trail", weight=0.08, sections=["rough", "steps", "cobbles", "flat"]),
+        dict(name="climb", kind="trail", weight=0.08, sections=["steps_up", "steps_down", "ramp_up", "ramp_down"]),
+        dict(name="slopes", kind="trail", weight=0.12, sections=["ramp_up", "ramp_down", "bank", "gully", "crest"]),
+        dict(name="stones", kind="trail", weight=0.10, sections=["stones", "stones", "flat", "rough"]),
+        dict(name="ridge", kind="trail", weight=0.10, sections=["ridge", "beam", "boulders", "beam"]),
+        dict(name="walls", kind="trail", weight=0.10, sections=["canyon", "gates", "obstacles", "ledge", "rough"]),
+        dict(name="hazards", kind="trail", weight=0.10, sections=["roots", "logs", "cobbles", "roots", "logs"]),
         # the real thing: everything mixed (two rows, so there are twice as many different trails)
-        dict(name="trail", kind="trail", weight=0.13, sections=_everything),
-        dict(name="trail", kind="trail", weight=0.13, sections=_everything),
+        dict(name="trail", kind="trail", weight=0.10, sections=_everything),
+        dict(name="trail", kind="trail", weight=0.10, sections=_everything),
     ]
     flat_rows = [dict(name="flat", kind="flat", weight=1.0)]
 
@@ -131,7 +145,7 @@ class HikeCfg:
     # in an arc. On flat ground half of the robots practise exactly that with random directions, the
     # other half gets random velocity commands (forwards / backwards, sideways, turning on the spot),
     # so the policy can move in any direction - the sorting task builds on that.
-    speed = [0.5, 0.9]              # commanded walking speed [m/s]
+    speed = [0.5, 1.1]              # commanded walking speed [m/s]
     max_side_speed = 0.3            # [m/s]
     max_back_speed = 0.3            # [m/s]
     max_yaw_rate = 1.0              # [rad/s]
@@ -173,6 +187,7 @@ class DomainRandCfg:
     noise_joint_pos = 0.01          # [rad]
     noise_joint_vel = 1.0           # [rad/s]
     noise_height_scan = 0.03        # [m]
+    noise_palm_touch = 0.05         # (palm contact force, scaled)
     noise_object_pos = 0.01         # [m] (sorting: box and table positions)
 
 
@@ -185,19 +200,22 @@ class EvalCfg:
     """
     unseen_rows = [
         dict(name="flat", kind="flat", weight=0.0),
-        # logs across the trail to step over
-        dict(name="logs", kind="trail", sections=["logs", "logs", "rough"]),
         # the left and right half of the trail at different heights
         dict(name="terraces", kind="trail", sections=["terraces", "terraces", "flat"]),
-        # loose rubble: smaller and taller bumps than the training "rough"
+        # loose rubble: bumps everywhere, smaller and taller than the training "rough"
         dict(name="rubble", kind="trail", sections=["rubble"]),
         # regular staircases, steeper than the irregular rock steps of training
         dict(name="staircase", kind="trail", sections=["stairs_up", "stairs_down"], step_rise=(0.05, 0.22)),
+        # steeper than any training slope: ramps up to 29 degrees, sideways tilt up to 25 degrees
+        dict(name="steep", kind="trail", sections=["ramp_up", "ramp_down", "bank", "gully"],
+             slope=(0.25, 0.55), bank_slope=(0.2, 0.46)),
+        # more and taller things in the way than in training
+        dict(name="debris", kind="trail", sections=["logs", "roots", "cobbles"],
+             log_height=(0.10, 0.32), root_height=(0.05, 0.14), cobble_height=(0.05, 0.14), cobble_density=(0.08, 0.2)),
         # switchbacks: swings left / right 60 % further than any training trail
-        dict(name="switchbacks", kind="trail", sections=["rough", "ridge", "steps"], winding=(0.6, 2.5)),
-        # all the training sections plus the new ones, on trails it has never walked
-        dict(name="new_trail", kind="trail",
-             sections=["rough", "steps", "stones", "ridge", "boulders", "logs", "terraces", "rubble", "stairs_up"]),
+        dict(name="switchbacks", kind="trail", sections=["rough", "ridge", "steps", "ramp"], winding=(0.6, 2.5)),
+        # all the training sections plus the test-only ones, on trails it has never walked
+        dict(name="new_trail", kind="trail", sections=HikeCfg._everything + ["terraces", "rubble", "stairs_up"]),
     ]
     unseen_seed = 1234
     # the training trails, with physics / disturbances the policy never experienced
@@ -257,7 +275,12 @@ class RewardCfg:
         "joint_limits": -5.0,
         "termination": -100.0,      # one-off penalty for falling (scaled by dt like the rest)
     }
+    arm_swing = 0.35                # how far each arm swings against the opposite leg at full speed [rad]
+    arm_swing_speed = 0.8           # ... "full speed" [m/s]; slower walking, smaller swing
+
     hike = {
+        "arm_swing": 0.3,           # arms swinging against the legs, like people walk. Only the shoulders'
+                                    # forward / backward joint is asked for; the rest of the arm is free
         "tracking_lin_vel": 1.5,    # follow the commanded velocity
         "tracking_ang_vel": 0.75,   # follow the commanded yaw rate
         "heading": 0.5,             # face along the trail (or the commanded direction)

@@ -116,7 +116,8 @@ def main():
     p.add_argument("--resume", nargs="?", const="latest", default=None,
                    help="continue from a checkpoint (no path = the newest model of the task, else the bundled one)")
     p.add_argument("--init-from", default=None, metavar="HIKE_MODEL",
-                   help="sort: hiking policy to start from (default: your newest hiking model, else the bundled one)")
+                   help="start as a copy of this hiking policy. sort always does (default: your newest hiking "
+                        "model, else the bundled one); hike: carries over a policy trained before the observation changed")
     p.add_argument("--name", default=None, help="run name (default: timestamp)")
     p.add_argument("--seed", type=int, default=0)
 
@@ -124,8 +125,8 @@ def main():
         add_task(p)
         p.add_argument("--model", default=None, help="checkpoint (default: newest of the task, else the bundled one)")
         p.add_argument("--terrain", default="trail", metavar="NAME",
-                       help="hike: a training trail (flat, rocky, climb, stones, ridge, trail) or a held-out one "
-                            "(logs, terraces, rubble, staircase, switchbacks, new_trail)")
+                       help="hike: a training trail (flat, rocky, climb, slopes, stones, ridge, walls, hazards, trail) "
+                            "or a held-out one (terraces, rubble, staircase, steep, debris, switchbacks, new_trail)")
         p.add_argument("--level", type=int, default=6, help="hike: difficulty level 0-9")
         p.add_argument("--speed", type=float, default=0.6, help="hike: commanded walking speed [m/s]")
         p.add_argument("--seed", type=int, default=0)
@@ -165,7 +166,7 @@ def main():
         elif resume and not os.path.exists(resume):
             sys.exit(f"Model not found: {resume}")
         init_from = None
-        if args.task == "sort" and not resume:
+        if not resume and (args.task == "sort" or args.init_from):
             # the sorting robot does not learn to walk again: it starts as a copy of a hiking policy
             init_from = resolve_model(args.init_from, "hike")
         train(task=args.task, num_envs=args.num_envs, max_iterations=args.iterations, flat_only=args.flat,
