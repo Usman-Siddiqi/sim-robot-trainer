@@ -286,7 +286,7 @@ class RewardCfg:
     hike = {
         "hands_in": -15.0,          # palms pressed against the thighs / trunk. Bracing the arms against its own
                                     # body lets the arm motors help the legs: a cheat, and it pins the arms down
-        "arm_swing": 0.6,           # arms swinging against the legs, like people walk. Only the shoulders'
+        "arm_swing": 1.0,           # arms swinging against the legs, like people walk. Only the shoulders'
                                     # forward / backward joint is asked for; the rest of the arm is free
         "tracking_lin_vel": 1.5,    # follow the commanded velocity
         "tracking_ang_vel": 0.75,   # follow the commanded yaw rate

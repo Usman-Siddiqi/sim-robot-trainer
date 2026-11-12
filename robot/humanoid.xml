@@ -17,7 +17,8 @@
   Robot geoms use contype=1/conaffinity=0 and the terrain uses contype=0/conaffinity=1,
   so the robot collides with the terrain but not with itself (cheaper and more robust). The few
   self-collisions that matter (hands / forearms against the body and each other) are listed
-  explicitly in <contact>. Free objects (boxes) use contype=1/conaffinity=1.
+  explicitly in <contact>. (Palms and thighs are not among them: a palm resting on a thigh would drown out
+  what the palm sensors are for - feeling walls, rails and the ground.) Free objects (boxes) use contype=1/conaffinity=1.
 -->
 <mujoco model="humanoid">
   <compiler angle="radian" autolimits="true"/>
@@ -193,8 +194,6 @@
     <pair geom1="r_forearm" geom2="trunk"/>
     <pair geom1="l_palm" geom2="pelvis"/>
     <pair geom1="r_palm" geom2="pelvis"/>
-    <pair geom1="l_palm" geom2="l_thigh"/>
-    <pair geom1="r_palm" geom2="r_thigh"/>
   </contact>
 
   <actuator>
