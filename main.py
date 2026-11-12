@@ -113,6 +113,7 @@ def main():
     p.add_argument("--iterations", type=int, default=PPOCfg.max_iterations, help="PPO iterations to run")
     p.add_argument("--device", default="auto", help="auto | cuda | cpu (neural networks)")
     p.add_argument("--threads", type=int, default=None, help="physics threads (default: all cores)")
+    p.add_argument("--shards", type=int, default=None, help="environments run side by side (default: 4; 1 = off)")
     p.add_argument("--resume", nargs="?", const="latest", default=None,
                    help="continue from a checkpoint (no path = the newest model of the task, else the bundled one)")
     p.add_argument("--init-from", default=None, metavar="HIKE_MODEL",
@@ -171,7 +172,7 @@ def main():
             init_from = resolve_model(args.init_from, "hike")
         train(task=args.task, num_envs=args.num_envs, max_iterations=args.iterations, flat_only=args.flat,
               device=args.device, num_threads=args.threads, resume=resume, run_name=args.name, seed=args.seed,
-              init_from=init_from)
+              init_from=init_from, shards=args.shards)
     elif args.command in ("play", "record", "eval"):
         model = resolve_model(args.model, args.task)
         if args.command == "play":

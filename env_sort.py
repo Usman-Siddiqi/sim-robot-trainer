@@ -91,13 +91,14 @@ def build_scene(box_size):
         spec.add_pair(geomname1=palm, geomname2="box", condim=4, friction=[mu, mu, 0.02, 0.0001, 0.0001],
                       solreffriction=cfg.palm_solreffriction, solimp=cfg.palm_solimp)
     model = spec.compile()
-    model.opt.timestep = SimCfg.timestep
+    model.opt.timestep = cfg.timestep
     return model
 
 
 class SortEnv(RobotEnv):
     task = "sort"
     episode_length_s = SortCfg.episode_length_s
+    timestep, decimation = SortCfg.timestep, SortCfg.decimation
     default_arm_pos = RobotCfg.carry_arm_pos
     progress_keys = (("sorted", "sorted"), ("stage", "stage"), ("drop", "dropped"), ("wrong", "wrong_table"),
                      ("guided", "guided"), ("kg", "max_box_mass"))

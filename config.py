@@ -22,8 +22,10 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 
 class SimCfg:
     model_path = os.path.join(_HERE, "robot", "humanoid.xml")
-    timestep = 0.005            # physics step [s] (200 Hz)
-    decimation = 4              # physics steps per policy step -> 50 Hz control
+    # Physics takes two 10 ms steps per decision of the policy. (Four 5 ms steps cost twice as much and a
+    # policy trained on them finishes exactly as many trails when run with these - it was measured.)
+    timestep = 0.010            # physics step [s] (100 Hz)
+    decimation = 2              # physics steps per policy step -> 50 Hz control
 
     @classmethod
     def control_dt(cls):
@@ -91,6 +93,11 @@ class HikeCfg:
     max_init_level = 1              # robots start on levels 0..max_init_level
     curriculum = True
     lookahead = 0.75                # the robot steers towards the trail centre this far ahead [m]
+    # Practice goes where it is needed: when a trail robot finishes an episode it may move to another kind
+    # of trail, and kinds the robots fail on more often get more of them (but none is ever left without).
+    focus = True
+    focus_rate = 0.5                # share of finished episodes after which the robot picks a new kind of trail
+    focus_floor = 0.3               # weight of a kind of trail that is always finished (never finished: 1.3)
     off_trail_margin = 0.6          # further than this beyond the trail edge = left the trail [m]
 
     # Difficulty: every pair is (level 0, last level)
@@ -307,6 +314,9 @@ class SortCfg:
     has to hold them up and lean back against the load by feel.
     """
     episode_length_s = 30.0
+    # smaller physics steps than hiking: the stiff palm-crate contact below needs them
+    timestep = 0.005
+    decimation = 4
     colors = [("red", (0.86, 0.22, 0.20)), ("green", (0.22, 0.66, 0.30)), ("blue", (0.20, 0.42, 0.90))]
     shuffle_colors = True           # which table has which colour changes every episode
     table_height = 0.70             # [m]
@@ -392,7 +402,9 @@ class SortCfg:
 
 class PPOCfg:
     # rollout
-    num_envs = 2048                 # parallel robots
+    num_envs = 4096                 # parallel robots
+    shards = 8                      # the robots are split over this many processes that run side by side
+                                    # (at most one per two physics threads)
     num_steps = 24                  # policy steps per robot per iteration
     max_iterations = 3000
 

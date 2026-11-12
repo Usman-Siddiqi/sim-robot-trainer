@@ -26,16 +26,20 @@ from agent import PPO, ActorCritic, get_device, load_policy, print_device_info, 
 from config import LOG_PATH, MODEL_SAVE_PATH, PPOCfg, RobotCfg, SortCfg
 
 
-def make_env(task, **kwargs):
-    """Create the environment of a task ("hike" or "sort")."""
-    if task == "hike":
-        from env_hike import HikeEnv
-        return HikeEnv(**kwargs)
-    if task == "sort":
-        from env_sort import SortEnv
-        kwargs.pop("flat_only", None)
-        return SortEnv(guide=SortCfg.guide_start, mass_level=SortCfg.mass_start, **kwargs)
-    raise ValueError(f"unknown task '{task}' (hike or sort)")
+def make_env(task, shards=None, **kwargs):
+    """
+    Create the environment of a task ("hike" or "sort").
+
+    With a thousand robots or more it is split into shards, processes that run side by side
+    (see parallel_env.py); `shards` overrides how many (1 = a single plain environment).
+    """
+    from parallel_env import ParallelEnv, make_single
+    threads = int(kwargs.get("num_threads") or os.cpu_count() or 1)
+    if shards is None:
+        shards = min(PPOCfg.shards, threads // 2) if kwargs.get("num_envs", 0) >= 1024 else 1
+    if shards <= 1:
+        return make_single(task, **kwargs)
+    return ParallelEnv(task, shards=shards, **kwargs)
 
 
 def find_latest_model(models_dir=MODEL_SAVE_PATH, task=None):
@@ -56,7 +60,7 @@ def find_latest_model(models_dir=MODEL_SAVE_PATH, task=None):
 
 def train(task="hike", num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_iterations, flat_only=False,
           device="auto", num_threads=None, resume=None, run_name=None, seed=0,
-          save_path=MODEL_SAVE_PATH, log_path=LOG_PATH, init_from=None):
+          save_path=MODEL_SAVE_PATH, log_path=LOG_PATH, init_from=None, shards=None):
     """
     Train the robot.
 
@@ -93,7 +97,8 @@ def train(task="hike", num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_itera
     print(f"Training run '{run_name}'  (task: {task})")
     print_device_info(device)
 
-    env = make_env(task, num_envs=num_envs, flat_only=flat_only, num_threads=num_threads, seed=seed)
+    env = make_env(task, shards=shards, num_envs=num_envs, flat_only=flat_only, num_threads=num_threads, seed=seed)
+    num_envs = env.num_envs
     print(f"{num_envs} robots x {PPOCfg.num_steps} steps = {num_envs * PPOCfg.num_steps:,} samples per iteration "
           f"| {env.num_threads} physics threads | obs {env.num_obs}, actions {env.num_actions}")
 

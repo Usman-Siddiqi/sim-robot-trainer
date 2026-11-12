@@ -592,6 +592,8 @@ class Terrain:
         self._inv_res = 1.0 / RES
         self._half_x, self._half_y = cfg.tile_length / 2, cfg.tile_width / 2
         self._max_ix, self._max_iy = self._raster.shape[1] - 1, self._raster.shape[2] - 1
+        self._nx, self._ny = self._raster.shape[1], self._raster.shape[2]
+        self._flat = self._raster.ravel()                           # one flat lookup is faster than three indices
 
         # path of every tile, sampled at the column centres
         self.path_x = self.tiles[0].x.copy()
@@ -618,9 +620,10 @@ class Terrain:
     # ------------------------------------------------------------------ queries
     def height(self, tile, x, y):
         """Terrain height [m] at points (x, y) of the given tiles. tile broadcasts against x and y."""
-        ix = np.clip(np.floor((np.asarray(x) + self._half_x) * self._inv_res), 0, self._max_ix).astype(np.int64)
-        iy = np.clip(np.floor((np.asarray(y) + self._half_y) * self._inv_res), 0, self._max_iy).astype(np.int64)
-        return self._raster[tile, ix, iy].astype(np.float64)
+        # (casting to int rounds towards zero, which is fine: everything left of the tile is clipped to cell 0 anyway)
+        ix = np.clip(np.asarray((x + self._half_x) * self._inv_res).astype(np.int32), 0, self._max_ix)
+        iy = np.clip(np.asarray((y + self._half_y) * self._inv_res).astype(np.int32), 0, self._max_iy)
+        return self._flat.take((tile * self._nx + ix) * self._ny + iy)
 
     def column(self, x):
         """Index of the path point at position x."""

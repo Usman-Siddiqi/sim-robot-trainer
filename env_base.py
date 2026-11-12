@@ -59,6 +59,8 @@ class RobotEnv:
     """Base class. Subclasses build the scenes and define the task (commands, rewards, resets)."""
 
     episode_length_s = 20.0
+    timestep = SimCfg.timestep  # physics step [s] and physics steps per policy step; a task may choose its own
+    decimation = SimCfg.decimation
     obs_layout = 2              # raised whenever the meaning of the observation changes (stored in checkpoints)
     default_arm_pos = RobotCfg.default_arm_pos
 
@@ -76,7 +78,7 @@ class RobotEnv:
         """
         self.num_envs = int(num_envs)
         self.rng = np.random.default_rng(seed)
-        self.dt = SimCfg.control_dt()
+        self.dt = self.timestep * self.decimation
         self.max_episode_length = int(round(self.episode_length_s / self.dt))
         self.randomize = bool(randomize)
         self.physics = physics
@@ -88,6 +90,7 @@ class RobotEnv:
         self.num_threads = int(num_threads or os.cpu_count() or 1)
         self.num_actions = len(RobotCfg.joint_names)
         self.common_step = 0
+        self._checked = False
 
     # ---------------------------------------------------------------- set-up
     def _init_sim(self, scene_models, variants=None, variants_per_scene=1):
@@ -130,9 +133,9 @@ class RobotEnv:
         self.nq, self.nv = m.nq, m.nv
 
         self.state = np.zeros((n, nstate))
-        self._state_traj = np.zeros((n, SimCfg.decimation, nstate))
-        self._sensor_traj = np.zeros((n, SimCfg.decimation, m.nsensordata))      # tasks may add sensors of their own
-        self._ctrl = np.zeros((n, 1, nu))
+        self._state_traj = np.zeros((n, self.decimation, nstate))
+        self._sensor_traj = np.zeros((n, self.decimation, m.nsensordata))      # tasks may add sensors of their own
+        self._ctrl = np.zeros((n, self.decimation, nu))   # the same joint targets for every physics sub-step
 
         # ------------------------------------------------------ robot constants
         nleg = RobotCfg.num_leg_joints
@@ -219,7 +222,7 @@ class RobotEnv:
 
     def step(self, actions):
         """
-        Advance all robots by one control step (SimCfg.decimation physics steps).
+        Advance all robots by one control step (`decimation` physics steps).
 
         Returns:
             obs (N, num_obs) float32, reward (N,) float32, done (N,) bool, info dict.
@@ -231,13 +234,14 @@ class RobotEnv:
         self.actions = np.clip(np.asarray(actions, dtype=np.float64), -ObsCfg.clip_actions, ObsCfg.clip_actions)
         target = self.default_joint_pos + self.action_scale * self.actions
         np.clip(target, self.joint_lower, self.joint_upper, out=target)
-        self._ctrl[:, 0, :] = target
+        self._ctrl[:] = target[:, None, :]
 
         # ---- physics: all robots, all cores
         self._rollout.rollout(
-            self._models, self._datas, self.state, self._ctrl, nstep=SimCfg.decimation,
-            state=self._state_traj, sensordata=self._sensor_traj,
+            self._models, self._datas, self.state, self._ctrl, nstep=self.decimation,
+            state=self._state_traj, sensordata=self._sensor_traj, skip_checks=self._checked,
         )
+        self._checked = True                                # the array shapes were validated on the first call
         self.state[:] = self._state_traj[:, -1]
         sensors = self._sensor_traj[:, -1]
         # a foot counts as "in contact" if it touched the ground during any physics sub-step
@@ -488,7 +492,11 @@ class RobotEnv:
         return np.clip(self.palm_touch / 20.0, 0.0, 3.0)
 
     def _finish_obs(self, parts):
-        obs = np.nan_to_num(np.concatenate(parts, axis=1), nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+        obs = np.concatenate([np.asarray(part, dtype=np.float32) for part in parts], axis=1)
+        np.nan_to_num(obs, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
         if self.obs_noise:
-            obs += self._noise_scale * self.rng.uniform(-1.0, 1.0, obs.shape).astype(np.float32)
+            noise = self.rng.random(obs.shape, dtype=np.float32)
+            noise -= 0.5
+            noise *= 2.0 * self._noise_scale
+            obs += noise
         return obs

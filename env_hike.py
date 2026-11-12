@@ -68,6 +68,10 @@ class HikeEnv(RobotEnv):
         else:
             self.env_level = self.rng.integers(0, min(cfg.max_init_level, max_level) + 1, size=n)
 
+        # how often each kind of trail is finished (running average) - decides where the robots practise
+        self.row_success = np.full(self.terrain.num_rows, 0.5)
+        self._row_weight = np.where(self.terrain.row_is_flat, 0.0, np.maximum(weights, 1e-6))
+
         # commands
         self.commands = np.zeros((n, 3))                    # forward speed, sideways speed, yaw rate
         self.speed = np.zeros(n)
@@ -209,6 +213,21 @@ class HikeEnv(RobotEnv):
         level[solved] = self.rng.integers(0, self.terrain.num_levels, int(solved.sum()))
         self.env_level[ids] = np.clip(level, 0, None)
 
+        # practice goes where it is needed: some of these robots move to a kind of trail that is failed more often
+        cfg, rng = HikeCfg, self.rng
+        rows = self.env_row[ids]
+        for row in np.unique(rows):
+            self.row_success[row] += 0.05 * (up[rows == row].mean() - self.row_success[row])
+        if cfg.focus and ids.size:
+            move = ids[rng.random(ids.size) < cfg.focus_rate]
+            need = self._row_weight * (cfg.focus_floor + 1.0 - self.row_success)
+            new_rows = rng.choice(self.terrain.num_rows, size=move.size, p=need / need.sum())
+            for i, row in zip(move, new_rows):
+                if row != self.env_row[i]:
+                    there = self.env_level[self.env_row == row]         # join at the level of a robot already there
+                    self.env_level[i] = rng.choice(there) if there.size else 0
+                    self.env_row[i] = row
+
     progress_keys = (("level", "terrain_level"), ("ok", "success"), ("off", "off_trail"))
 
     def curriculum_state(self):
@@ -259,6 +278,8 @@ class HikeEnv(RobotEnv):
             stats["terrain_level"] = float(self.env_level[~self.is_flat].mean())
             for row in np.unique(self.env_row[~self.is_flat]):
                 stats[f"level/{row}_{self.terrain.row_names[row]}"] = float(self.env_level[self.env_row == row].mean())
+                stats[f"finished/{row}_{self.terrain.row_names[row]}"] = float(self.row_success[row])
+                stats[f"robots/{row}_{self.terrain.row_names[row]}"] = float((self.env_row == row).mean())
         return stats
 
 
