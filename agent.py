@@ -220,7 +220,7 @@ class PPO:
                 nn.utils.clip_grad_norm_(self.policy.parameters(), cfg.max_grad_norm)
                 self.optimizer.step()
                 with torch.no_grad():
-                    self.policy.log_std.clamp_(max=math.log(cfg.max_noise_std))
+                    self.policy.log_std.clamp_(min=math.log(cfg.min_noise_std), max=math.log(cfg.max_noise_std))
 
                 stats["value_loss"] += value_loss.item()
                 stats["surrogate_loss"] += surrogate.item()

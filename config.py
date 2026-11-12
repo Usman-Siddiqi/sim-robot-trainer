@@ -341,10 +341,10 @@ class SortCfg:
     box_sizes = [[0.20, 0.26, 0.20], [0.18, 0.24, 0.18], [0.22, 0.28, 0.22], [0.20, 0.24, 0.16], [0.18, 0.28, 0.22]]
     box_mass = [0.5, 6.0]           # [kg]
     num_box_masses = 12             # different masses within that range
-    # Training starts with the lightest boxes only; a heavier one is added whenever the robots get most
-    # boxes off the table (mean furthest stage per episode >= mass_threshold).
+    # Training starts with the lightest boxes only; a heavier one is added whenever the robots deliver
+    # at least mass_threshold boxes per episode on average.
     mass_start = 3                  # number of box masses at the start (0.5, 1.0, 1.5 kg)
-    mass_threshold = 1.7
+    mass_threshold = 0.5
     num_robot_variants = 8          # robot / floor physics variants (domain randomisation)
     box_friction = 1.0
     rim_width = 0.06                # the rim sticks out this far beyond the left and right side [m]
@@ -390,7 +390,14 @@ class SortCfg:
     guide_every = 10                # ... every so many iterations
     guide_threshold = 1.0           # ... while robots sort at least this many boxes per episode on average
 
-    # The task reward is a progress score:  5 * boxes sorted + stage + progress within the stage (0..1)
+    # How much each stage is worth: the score at its start, and how much progress within it adds. Carrying is
+    # worth the most by far - otherwise a robot that holds a crate just above the table and stays there earns
+    # nearly as much as one that risks walking off with it.
+    stage_base = [0.0, 1.0, 2.0, 5.0, 6.0]
+    stage_span = [1.0, 1.0, 3.0, 1.0, 1.0]
+    box_value = 7.0                 # score added for every box sorted
+
+    # The task reward is a progress score:  box_value * boxes sorted + score of the stage + its progress
     #   stage 0  fetch    walk to the box, palms to its two sides (just under the rim)
     #   stage 1  lift     lift it off the table (progress: share of its weight the hands carry, then height)
     #   stage 2  carry    carry it to the table of its colour
@@ -432,6 +439,8 @@ class PPOCfg:
     lam = 0.95
     clip_param = 0.2
     entropy_coef = 0.001
+    min_noise_std = 0.2             # ... and above this while training: a policy that stops trying things
+                                    # gets stuck with a half-solution (holding the crate but never carrying it)
     max_noise_std = 0.6             # exploration noise per joint is kept below this. Joints the reward hardly
                                     # depends on (the shoulders' sideways joint) otherwise drift up to pure noise,
                                     # and a robot whose arms flail at random never finds out what they are good for

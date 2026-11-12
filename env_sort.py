@@ -171,6 +171,7 @@ class SortEnv(RobotEnv):
         self.wrong_count = np.zeros(n)
         self.table_force = np.zeros(n)                          # force on the bottom of the box [N]
         self.commands = np.zeros((n, 3))                        # forward speed, sideways speed, yaw rate
+        self._stage_base, self._stage_span = np.array(cfg.stage_base), np.array(cfg.stage_span)
         self.guided = np.zeros(n, dtype=bool)
 
         self.num_scan = len(HikeCfg.scan_x) * len(HikeCfg.scan_y)
@@ -380,11 +381,13 @@ class SortEnv(RobotEnv):
         return fell, time_out, {"dropped": dropped, "wrong_table": wrong, "sorted": self.just_sorted.copy()}
 
     def _task_terms(self, fell):
+        cfg = SortCfg
         cmd, sigma = self.commands, RewardCfg.tracking_sigma
         lin_err = (cmd[:, 0] - self.base_lin_vel[:, 0]) ** 2 + (cmd[:, 1] - self.base_lin_vel[:, 1]) ** 2
         rel_vel = self.box_vel - self.base_lin_vel_world
         return {
-            "stage": NUM_STAGES * self.reward_count + self.stage + self.stage_progress,
+            "stage": cfg.box_value * self.reward_count + self._stage_base[self.stage]
+                     + self._stage_span[self.stage] * self.stage_progress,
             # the reward always knows where the robot should walk, whether the robot was told or not
             "tracking_lin_vel": np.exp(-lin_err / sigma),
             "tracking_ang_vel": np.exp(-(cmd[:, 2] - self.base_ang_vel[:, 2]) ** 2 / RewardCfg.tracking_sigma_yaw),
@@ -443,7 +446,7 @@ class SortEnv(RobotEnv):
         cfg = SortCfg
         if iteration % cfg.guide_every:
             return
-        if self.mass_level < self.box_masses.size and stats.get("stage", 0.0) >= cfg.mass_threshold:
+        if self.mass_level < self.box_masses.size and stats.get("sorted", 0.0) >= cfg.mass_threshold:
             self.mass_level += 1
         elif self.guide_probability > 0.0 and stats.get("sorted", 0.0) >= cfg.guide_threshold:
             self.guide_probability = max(0.0, round(self.guide_probability - cfg.guide_step, 4))
