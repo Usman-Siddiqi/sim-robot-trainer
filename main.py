@@ -15,6 +15,7 @@ Command line entry point of sim-robot-trainer. There are two tasks:
     python main.py eval  --task hike        success rates, including conditions it never trained in
     python main.py record --task sort --output sort.mp4
     python main.py bench --task hike        how fast is the simulation on this machine?
+    python main.py watch                    follow the progress of the training that is running
     python main.py list                     list saved models
 
 Run `python main.py <command> --help` for the options of each command.
@@ -72,6 +73,29 @@ def resolve_model(path, task):
         print(f"No trained {task} model found - using the bundled one: {PRETRAINED[task]}")
         return PRETRAINED[task]
     sys.exit(f"No {task} model found. Train one first: python main.py train --task {task}")
+
+
+def watch(models_dir=MODEL_SAVE_PATH, lines=5):
+    """Follow the log of the training run that was written to most recently (Ctrl+C stops watching, not the training)."""
+    logs = [os.path.join(root, f) for root, _, files in os.walk(models_dir) for f in files
+            if f.startswith("train") and f.endswith(".log")]
+    if not logs:
+        sys.exit(f"No training log under '{models_dir}' yet. Start one with: python main.py train")
+    path = max(logs, key=os.path.getmtime)
+    print(f"Following {path}  (Ctrl+C stops watching; the training keeps running)")
+    print("  steps/s = speed, level = average difficulty 0-9, ok = share of trails finished, eta = minutes left\n")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f.readlines()[-lines:]:
+                print(line.rstrip())
+            while True:
+                line = f.readline()
+                if line:
+                    print(line.rstrip(), flush=True)
+                else:
+                    time.sleep(1.0)
+    except KeyboardInterrupt:
+        pass
 
 
 def bench(task, num_envs, num_threads):
@@ -154,6 +178,9 @@ def main():
     p.add_argument("--num_envs", type=int, default=PPOCfg.num_envs)
     p.add_argument("--threads", type=int, default=None)
 
+    p = sub.add_parser("watch", help="follow the progress of the training that is running")
+    p.add_argument("--models_dir", default=MODEL_SAVE_PATH)
+
     p = sub.add_parser("list", help="list saved models")
     p.add_argument("--models_dir", default=MODEL_SAVE_PATH)
 
@@ -186,6 +213,8 @@ def main():
             evaluate(model, args.num_envs, args.device, args.threads, suite=args.suite)
     elif args.command == "bench":
         bench(args.task, args.num_envs, args.threads)
+    elif args.command == "watch":
+        watch(args.models_dir)
     elif args.command == "list":
         list_models(args.models_dir)
 

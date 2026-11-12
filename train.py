@@ -14,6 +14,7 @@ checkpoints go to models/<run name>/. Training can be stopped with Ctrl+C at
 any time - the current policy is saved - and continued later with --resume.
 """
 
+import builtins
 import os
 import time
 from collections import deque
@@ -92,6 +93,13 @@ def train(task="hike", num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_itera
     run_name = run_name or f"{label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     run_dir = os.path.join(save_path, run_name)
     os.makedirs(run_dir, exist_ok=True)
+
+    # everything printed during training also goes to models/<run>/train.log (follow it with: python main.py watch)
+    log_file = open(os.path.join(run_dir, "train.log"), "a", encoding="utf-8")
+
+    def print(*args, **kwargs):
+        builtins.print(*args, **kwargs)
+        builtins.print(*args, **{**kwargs, "file": log_file, "flush": True})
 
     print("=" * 70)
     print(f"Training run '{run_name}'  (task: {task})")
@@ -224,6 +232,7 @@ def train(task="hike", num_envs=PPOCfg.num_envs, max_iterations=PPOCfg.max_itera
     print(f"Done: {total_steps:,} steps in {minutes:.1f} min. Final model: {final_path}")
     print(f"Watch it:   python main.py play --task {task} --model {final_path}")
     print(f"Continue:   python main.py train --task {task} --resume {final_path}")
+    log_file.close()
     return final_path
 
 
