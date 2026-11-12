@@ -402,7 +402,9 @@ class SortCfg:
         "tracking_ang_vel": 0.5,
         "heading": 0.3,             # facing where it is going / the table it is at
         "box_vel": -0.5,            # held box moving relative to the torso
-        "box_shove": -2.0,          # box pushed around / tipped over on the pickup table
+        "box_shove": 0.0,           # box pushed around / tipped over on the pickup table. Off: with the light crates
+                                    # training starts on, any touch moves the crate, and a penalty for that
+                                    # teaches the robot to keep its hands away from it
         "arm_pos": 0.0,
         "sorted": 250.0,            # one-off bonus per box sorted (scaled by dt like the rest)
         "wrong_table": -100.0,      # one-off: box put on the wrong table (a new box appears)
