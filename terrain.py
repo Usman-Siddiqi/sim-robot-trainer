@@ -17,7 +17,13 @@ A trail is assembled from sections, each 2-3 m long:
     flat        plain trail                      rough     bumpy paving
     steps       irregular rock steps up / down   steps_up / steps_down   a climb / a descent
     stones      stepping stones over a gap       ridge     a narrow ridge
-    boulders    boulders next to the trail       (and for testing only: logs, terraces, rubble, stairs)
+    boulders    boulders next to the trail       canyon    a corridor between two rock walls
+    gates       walls across the trail with an opening, alternately left and right
+    obstacles   rocks in the middle of the trail to walk around
+    ledge       a narrow ledge with a wall on one side and a drop on the other
+    (and for testing only: logs, terraces, rubble, stairs)
+
+Walls and rocks are too tall to step on, but low enough to put a hand on.
 
 The Terrain class does two jobs that must agree with each other:
 
@@ -41,7 +47,9 @@ QUANT = 0.005       # column heights are multiples of this [m]
 _COLORS = {
     "flat": (0.45, 0.48, 0.52), "rocky": (0.62, 0.58, 0.50), "climb": (0.56, 0.60, 0.68),
     "stones": (0.52, 0.64, 0.60), "ridge": (0.70, 0.60, 0.52), "trail": (0.64, 0.62, 0.54),
+    "walls": (0.66, 0.56, 0.48),
 }
+_WALL_COLOR = (0.36, 0.33, 0.31)        # walls, boulders and other rock that stands on the trail
 _DEFAULT_COLOR = (0.66, 0.58, 0.62)
 
 
@@ -118,6 +126,15 @@ class _Builder:
         self.elev_left[i:] = e
         self.elev_right[max(i + shift_right, 0):] = e
         self.e = e
+
+    def wall(self, i, y0, y1, height, columns=1):
+        """Rock standing `height` above the trail, from y0 to y1 [m] across, in columns i .. i + columns."""
+        cfg = self.cfg
+        j0 = int(round((min(y0, y1) + cfg.tile_width / 2) / cfg.cell))
+        j1 = int(round((max(y0, y1) + cfg.tile_width / 2) / cfg.cell))
+        j0, j1 = max(j0, 0), min(j1, self.tile.ny)
+        if j1 > j0:
+            self.boulders.append((i, i + columns, j0, j1, height))
 
 
 def _sec_flat(b, i0, i1):
@@ -229,6 +246,65 @@ def _sec_boulders(b, i0, i1):
         b.boulders.append((ic, ic + size, max(j0, 0), min(j0 + size, tile.ny), rng.uniform(0.5, 0.9)))
 
 
+def _sec_canyon(b, i0, i1):
+    """A corridor between two rock walls. It winds with the trail; the walls are there to lean on."""
+    inner, thick = b.param("canyon_half_width"), b.cfg.wall_thickness
+    height = b.rng.uniform(*b.cfg.wall_height)
+    b.half_width[i0:i1] = inner + thick
+    for i in range(i0 + 1, i1 - 1):
+        c = b.center[i]
+        b.wall(i, c + inner, c + inner + thick, height)
+        b.wall(i, c - inner - thick, c - inner, height)
+
+
+def _sec_gates(b, i0, i1):
+    """Walls across the trail, each with one opening - alternately left and right of the middle."""
+    rng, cfg = b.rng, b.cfg
+    half = max(float(b.half_width[i0]), 1.25)
+    opening, offset = b.param("gate_opening"), b.param("gate_offset")
+    height = rng.uniform(*cfg.wall_height)
+    b.half_width[i0:i1] = half
+    b.path_y[i0 + 1:i1 - 1] = np.nan                    # the line to walk runs straight from opening to opening
+    i, side = i0 + 5, rng.choice([-1.0, 1.0])
+    while i < i1 - 5:
+        c = b.center[i]
+        middle = c + side * offset * rng.uniform(0.6, 1.0)
+        b.wall(i, c - half, middle - opening / 2, height, columns=2)
+        b.wall(i, middle + opening / 2, c + half, height, columns=2)
+        b.path_y[i - 1:i + 3] = middle
+        i += b.cells(rng.uniform(1.9, 2.4))
+        side = -side
+
+
+def _sec_obstacles(b, i0, i1):
+    """Rocks standing in the middle of the trail: the robot has to walk around them."""
+    rng, cfg = b.rng, b.cfg
+    b.half_width[i0:i1] = np.maximum(b.half_width[i0:i1], 1.25)
+    b.path_y[i0 + 1:i1 - 1] = np.nan
+    clearance = b.param("obstacle_clearance")
+    i, side = i0 + 5, rng.choice([-1.0, 1.0])
+    while i < i1 - 6:
+        size = int(rng.integers(3, 6))
+        width = size * cfg.cell
+        c = b.center[i + size // 2] + rng.uniform(-0.1, 0.1)
+        b.wall(i, c - width / 2, c + width / 2, rng.uniform(*cfg.wall_height), columns=size)
+        b.path_y[i - 1:i + size + 1] = c + side * (width / 2 + clearance)
+        i += size + b.cells(rng.uniform(1.6, 2.1))
+        side = -side if rng.random() < 0.7 else side
+
+
+def _sec_ledge(b, i0, i1):
+    """A narrow ledge along a rock wall: a wall to hold on to on one side, a drop on the other."""
+    tile, thick = b.tile, b.cfg.wall_thickness
+    half = b.param("ridge_half_width")
+    height, side = b.rng.uniform(*b.cfg.wall_height), b.rng.choice([-1.0, 1.0])
+    b.half_width[i0:i1] = half + thick
+    for i in range(i0, i1):
+        c = b.center[i]
+        b.solid[i, -side * (tile.y - c) > half] = False     # nothing on the open side beyond the ledge
+        b.wall(i, c + side * half, c + side * (half + thick), height)
+
+
 def _sec_logs(b, i0, i1):
     """(test only) logs lying across the trail."""
     rng, i = b.rng, i0 + 3
@@ -253,6 +329,7 @@ def _sec_terraces(b, i0, i1):
 SECTIONS = {
     "flat": _sec_flat, "rough": _sec_rough, "steps": _sec_steps, "steps_up": _sec_steps_up,
     "steps_down": _sec_steps_down, "stones": _sec_stones, "ridge": _sec_ridge, "boulders": _sec_boulders,
+    "canyon": _sec_canyon, "gates": _sec_gates, "obstacles": _sec_obstacles, "ledge": _sec_ledge,
     # only used by the held-out test trails
     "logs": _sec_logs, "terraces": _sec_terraces, "rubble": _sec_rubble,
     "stairs_up": _sec_stairs_up, "stairs_down": _sec_stairs_down,
@@ -406,6 +483,8 @@ class Terrain:
             for x0, x1, y0, y1, top in tile.boxes:
                 # lighter with height, plus a little variation so neighbouring rocks can be told apart
                 shade = 0.62 + 0.22 * np.clip((top - lo) / 2.0, 0.0, 1.0) + 0.09 * np.sin(37.0 * x0 + 91.0 * y0 + 53.0 * top)
+                standing = top > tile.path_elev[self.column((x0 + x1) / 2)] + 0.4
+                base = np.array(_WALL_COLOR if standing else _COLORS.get(row["name"], _DEFAULT_COLOR))
                 world.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, pos=[(x0 + x1) / 2, (y0 + y1) / 2, top / 2],
                                size=[(x1 - x0) / 2, (y1 - y0) / 2, top / 2],
                                rgba=[*np.clip(base * shade / 0.8, 0.0, 1.0), 1], contype=0, conaffinity=1)

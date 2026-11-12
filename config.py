@@ -104,18 +104,26 @@ class HikeCfg:
     stone_zigzag = (0.0, 0.3)       # stepping stones alternate this far left / right of the trail [m]
     boulders = (1, 5)               # boulders per boulder section
     boulder_clearance = (0.7, 0.42) # free space between the trail centre and a boulder [m]
+    # walls and obstacles: too tall to step on, low enough to put a hand on
+    wall_height = (0.6, 0.9)        # above the trail [m] (random per section, not a difficulty)
+    wall_thickness = 0.25           # [m]
+    canyon_half_width = (0.8, 0.42) # half the width of the corridor between two walls [m]
+    gate_opening = (1.4, 0.8)       # width of the opening in a wall across the trail [m]
+    gate_offset = (0.15, 0.5)       # openings are this far left / right of the middle of the trail [m]
+    obstacle_clearance = (0.6, 0.4) # free space between a rock in the trail and the line to walk [m]
 
+    _everything = ["rough", "steps", "steps_up", "steps_down", "stones", "ridge", "boulders",
+                   "canyon", "gates", "obstacles", "ledge"]
     rows = [
-        dict(name="flat", kind="flat", weight=0.20),
-        dict(name="rocky", kind="trail", weight=0.125, sections=["rough", "steps", "flat"]),
-        dict(name="climb", kind="trail", weight=0.125, sections=["steps_up", "steps_up", "steps_down", "steps_down", "flat"]),
-        dict(name="stones", kind="trail", weight=0.125, sections=["stones", "stones", "flat", "rough"]),
-        dict(name="ridge", kind="trail", weight=0.125, sections=["ridge", "boulders", "ridge", "rough"]),
+        dict(name="flat", kind="flat", weight=0.16),
+        dict(name="rocky", kind="trail", weight=0.11, sections=["rough", "steps", "flat"]),
+        dict(name="climb", kind="trail", weight=0.11, sections=["steps_up", "steps_up", "steps_down", "steps_down", "flat"]),
+        dict(name="stones", kind="trail", weight=0.12, sections=["stones", "stones", "flat", "rough"]),
+        dict(name="ridge", kind="trail", weight=0.10, sections=["ridge", "boulders", "ridge", "rough"]),
+        dict(name="walls", kind="trail", weight=0.14, sections=["canyon", "gates", "obstacles", "ledge", "rough"]),
         # the real thing: everything mixed (two rows, so there are twice as many different trails)
-        dict(name="trail", kind="trail", weight=0.15,
-             sections=["rough", "steps", "steps_up", "steps_down", "stones", "ridge", "boulders"]),
-        dict(name="trail", kind="trail", weight=0.15,
-             sections=["rough", "steps", "steps_up", "steps_down", "stones", "ridge", "boulders"]),
+        dict(name="trail", kind="trail", weight=0.13, sections=_everything),
+        dict(name="trail", kind="trail", weight=0.13, sections=_everything),
     ]
     flat_rows = [dict(name="flat", kind="flat", weight=1.0)]
 
@@ -253,7 +261,8 @@ class RewardCfg:
         "tracking_lin_vel": 1.5,    # follow the commanded velocity
         "tracking_ang_vel": 0.75,   # follow the commanded yaw rate
         "heading": 0.5,             # face along the trail (or the commanded direction)
-        "arm_pos": -0.05,           # arms far from the relaxed pose (they are free to swing for balance)
+        "arm_pos": -0.02,           # arms far from the relaxed pose. Kept tiny: the arms are free to swing
+                                    # for balance and to reach for a wall
     }
 
 

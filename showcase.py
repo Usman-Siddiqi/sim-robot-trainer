@@ -35,6 +35,8 @@ HIKE = [
          terrain="stones", level=6, speed=0.6),
     dict(title="Ridge and boulders", sub="50 cm wide ridge", tag="TRAINED",
          terrain="ridge", level=9, speed=0.6),
+    dict(title="Walls and obstacles", sub="a canyon, gates to weave through, rocks in the way, a ledge along a wall",
+         tag="TRAINED", terrain="walls", level=8, speed=0.6),
     dict(title="The full hike", sub="everything mixed, hardest level", tag="TRAINED",
          terrain="trail", level=9, speed=0.7),
     dict(title="A trail it has never walked", sub="new layout with logs, terraces and rubble it never trained on",
