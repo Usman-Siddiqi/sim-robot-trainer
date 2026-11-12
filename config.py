@@ -405,8 +405,10 @@ class PPOCfg:
     gamma = 0.99
     lam = 0.95
     clip_param = 0.2
-    entropy_coef = 0.002
-    max_noise_std = 1.0             # exploration noise per joint is kept below this
+    entropy_coef = 0.001
+    max_noise_std = 0.6             # exploration noise per joint is kept below this. Joints the reward hardly
+                                    # depends on (the shoulders' sideways joint) otherwise drift up to pure noise,
+                                    # and a robot whose arms flail at random never finds out what they are good for
     value_loss_coef = 1.0
     num_epochs = 5
     num_minibatches = 4
