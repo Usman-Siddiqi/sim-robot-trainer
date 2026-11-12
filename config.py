@@ -45,7 +45,7 @@ class RobotCfg:
         0.0, 0.0, -0.3, 0.6, -0.3, 0.0,
     ]
     # arms hanging next to the body, elbows slightly bent (hiking)
-    default_arm_pos = [0.15, 0.12, 0.0, -0.5, 0.15, -0.12, 0.0, -0.5]
+    default_arm_pos = [0.15, 0.22, 0.0, -0.5, 0.15, -0.22, 0.0, -0.5]
     # forearms pointing forward, palms facing each other, far enough apart to pass the rim of a crate
     carry_arm_pos = [-0.25, 0.28, 0.0, -1.35, -0.25, -0.28, 0.0, -1.35]
     init_height = 0.79          # torso height above the ground at reset [m]
@@ -94,10 +94,10 @@ class HikeCfg:
     off_trail_margin = 0.6          # further than this beyond the trail edge = left the trail [m]
 
     # Difficulty: every pair is (level 0, last level)
-    winding = (0.2, 1.6)            # how far the trail swings left / right [m]
+    winding = (0.3, 2.0)            # how far the trail swings left / right [m]
     half_width = (1.5, 0.6)         # half the width of the trail [m]
     ridge_half_width = (0.7, 0.25)  # ... on ridge sections
-    step_rise = (0.04, 0.20)        # rock steps [m]
+    step_rise = (0.05, 0.23)        # rock steps [m]
     rough_height = (0.02, 0.10)     # bumps on rough sections, peak to peak [m]
     stone_gap = (0.0, 0.25)         # gap between stepping stones [m]
     stone_half_width = (0.6, 0.25)
@@ -117,22 +117,25 @@ class HikeCfg:
     bank_slope = (0.06, 0.36)       # trail tilted sideways, gullies and crests
     stone_tilt = (0.0, 0.22)        # stepping stones lie crooked by up to this much
     # things to trip over / step over
-    root_height = (0.02, 0.10)      # roots: low and thin [m]
-    log_height = (0.06, 0.26)       # logs [m]
+    root_height = (0.03, 0.12)      # roots: low and thin [m]
+    log_height = (0.08, 0.30)       # logs [m]
     cobble_height = (0.03, 0.10)    # loose stones [m]
     cobble_density = (0.03, 0.12)   # share of the trail covered by them
     beam_half_width = (0.5, 0.125)  # half the width of a balance beam [m]
+    bridge_half_width = (0.4, 0.09) # half the width of the plank of a bridge [m]
+    bridge_rail_distance = 0.45     # its hand rails are this far left / right of the middle [m]
+    bridge_rail_height = (0.7, 0.85)
 
     _everything = ["rough", "steps", "steps_up", "steps_down", "stones", "ridge", "boulders",
                    "canyon", "gates", "obstacles", "ledge", "ramp_up", "ramp_down", "bank", "gully", "crest",
-                   "roots", "logs", "cobbles", "beam"]
+                   "roots", "logs", "cobbles", "beam", "scree", "bridge"]
     rows = [
         dict(name="flat", kind="flat", weight=0.12),
         dict(name="rocky", kind="trail", weight=0.08, sections=["rough", "steps", "cobbles", "flat"]),
         dict(name="climb", kind="trail", weight=0.08, sections=["steps_up", "steps_down", "ramp_up", "ramp_down"]),
-        dict(name="slopes", kind="trail", weight=0.12, sections=["ramp_up", "ramp_down", "bank", "gully", "crest"]),
+        dict(name="slopes", kind="trail", weight=0.12, sections=["ramp_up", "ramp_down", "bank", "gully", "crest", "scree"]),
         dict(name="stones", kind="trail", weight=0.10, sections=["stones", "stones", "flat", "rough"]),
-        dict(name="ridge", kind="trail", weight=0.10, sections=["ridge", "beam", "boulders", "beam"]),
+        dict(name="ridge", kind="trail", weight=0.10, sections=["ridge", "beam", "bridge", "beam", "bridge"]),
         dict(name="walls", kind="trail", weight=0.10, sections=["canyon", "gates", "obstacles", "ledge", "rough"]),
         dict(name="hazards", kind="trail", weight=0.10, sections=["roots", "logs", "cobbles", "roots", "logs"]),
         # the real thing: everything mixed (two rows, so there are twice as many different trails)
@@ -145,7 +148,7 @@ class HikeCfg:
     # in an arc. On flat ground half of the robots practise exactly that with random directions, the
     # other half gets random velocity commands (forwards / backwards, sideways, turning on the spot),
     # so the policy can move in any direction - the sorting task builds on that.
-    speed = [0.5, 1.1]              # commanded walking speed [m/s]
+    speed = [0.5, 1.2]              # commanded walking speed [m/s]
     max_side_speed = 0.3            # [m/s]
     max_back_speed = 0.3            # [m/s]
     max_yaw_rate = 1.0              # [rad/s]
@@ -175,7 +178,7 @@ class DomainRandCfg:
 
     push_robots = True
     push_interval_s = 5.0
-    max_push_vel = 0.5              # random horizontal velocity kick [m/s]
+    max_push_vel = 0.7              # random horizontal velocity kick [m/s]
     init_joint_noise = 0.1          # [rad]
     init_vel_noise = 0.2            # [m/s], [rad/s]
 
@@ -223,10 +226,10 @@ class EvalCfg:
         dict(name="slippery (friction 0.4)", physics=dict(friction=0.4)),
         dict(name="heavy backpack (+6 kg)", physics=dict(payload=6.0)),
         dict(name="weak motors (80 %)", physics=dict(motor_strength=0.8)),
-        dict(name="hard shoves (0.8 m/s every 3 s)", push=dict(max_push_vel=0.8, push_interval_s=3.0)),
+        dict(name="hard shoves (1.1 m/s every 3 s)", push=dict(max_push_vel=1.1, push_interval_s=3.0)),
         dict(name="all at once (0.45, +5 kg, 85 %, shoves)",
              physics=dict(friction=0.45, payload=5.0, motor_strength=0.85),
-             push=dict(max_push_vel=0.6, push_interval_s=4.0)),
+             push=dict(max_push_vel=0.9, push_interval_s=4.0)),
     ]
     # the sorting room, with boxes / physics / disturbances the policy never experienced
     sort_unseen_conditions = [
@@ -278,12 +281,12 @@ class RewardCfg:
     arm_swing = 0.35                # how far each arm swings against the opposite leg at full speed [rad]
     arm_swing_speed = 0.8           # ... "full speed" [m/s]; slower walking, smaller swing
 
-    hands_clear = 0.19              # palms closer than this to the body's middle plane count as tucked in [m]
+    hands_clear = 0.215             # palms closer than this to the body's middle plane count as tucked in [m]
 
     hike = {
         "hands_in": -15.0,          # palms pressed against the thighs / trunk. Bracing the arms against its own
                                     # body lets the arm motors help the legs: a cheat, and it pins the arms down
-        "arm_swing": 0.3,           # arms swinging against the legs, like people walk. Only the shoulders'
+        "arm_swing": 0.6,           # arms swinging against the legs, like people walk. Only the shoulders'
                                     # forward / backward joint is asked for; the rest of the arm is free
         "tracking_lin_vel": 1.5,    # follow the commanded velocity
         "tracking_ang_vel": 0.75,   # follow the commanded yaw rate

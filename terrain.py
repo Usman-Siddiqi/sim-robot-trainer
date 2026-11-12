@@ -25,6 +25,7 @@ A trail is assembled from sections, each 2-3 m long:
     gully       a V-shaped trough                crest     an A-shaped roof to walk along
     roots       low roots to trip over           logs      logs to step over
     cobbles     loose stones                     beam      a balance beam
+    scree       a slope covered in loose stones  bridge    a plank with a hand rail on each side
     (and for testing only: terraces, rubble, stairs)
 
 Most of the trail is built from flat-topped columns; slopes are tilted slabs.
@@ -437,6 +438,26 @@ def _sec_cobbles(b, i0, i1):
                 b.bump[i:i + int(rng.integers(1, 3)), j:j + int(rng.integers(1, 3))] += height * rng.uniform(0.5, 1.0)
 
 
+def _sec_scree(b, i0, i1):
+    """A slope covered in loose stones."""
+    _ramp(b, i0, i1, "mixed")
+    _sec_cobbles(b, i0 + 2, i1 - 2)
+
+
+def _sec_bridge(b, i0, i1):
+    """A plank bridge: a narrow plank over a drop, with a hand rail on each side within arm's reach."""
+    tile, cfg = b.tile, b.cfg
+    half, rail = b.param("bridge_half_width"), cfg.bridge_rail_distance
+    height = b.rng.uniform(*cfg.bridge_rail_height)
+    a, end = i0 + 2, i1 - 2
+    b.half_width[a:end] = rail + cfg.cell
+    for i in range(a, end):
+        across = np.abs(tile.y - b.center[i])
+        b.solid[i, (across > half) & (across < rail)] = False       # nothing between the plank and the rails
+        b.wall(i, b.center[i] + rail, b.center[i] + rail + cfg.cell, height)
+        b.wall(i, b.center[i] - rail - cfg.cell, b.center[i] - rail, height)
+
+
 def _sec_beam(b, i0, i1):
     """A balance beam: much narrower than a ridge."""
     b.half_width[i0 + 1:i1 - 1] = b.param("beam_half_width")
@@ -461,6 +482,7 @@ SECTIONS = {
     "ramp": _sec_ramp, "ramp_up": _sec_ramp_up, "ramp_down": _sec_ramp_down,
     "bank": _sec_bank, "gully": _sec_gully, "crest": _sec_crest,
     "roots": _sec_roots, "logs": _sec_logs, "cobbles": _sec_cobbles, "beam": _sec_beam,
+    "scree": _sec_scree, "bridge": _sec_bridge,
     # only used by the held-out test trails
     "terraces": _sec_terraces, "rubble": _sec_rubble,
     "stairs_up": _sec_stairs_up, "stairs_down": _sec_stairs_down,
