@@ -361,6 +361,8 @@ class SortCfg:
     palm_solimp = [0.98, 0.99, 0.001, 0.5, 2.0]
 
     stand_off = 0.37                # torso <-> box distance for picking up / putting down [m]
+    grip_along = 0.05               # the palms belong within this distance of the middle of the crate's sides [m]
+    max_tilt = 0.06                 # a lifted crate tilted by more than about 20 degrees earns no progress
     grip_distance = 0.09            # a box counts as gripped while both palms are this close to their place on its sides [m]
     lift_height = 0.08              # a box counts as picked up when it is this far above the table [m]
     place_margin = 0.07             # a placed box must be at least this far inside the table edge [m]

@@ -266,7 +266,7 @@ class SortEnv(RobotEnv):
         hx, hy, hz = self.box_half.T
 
         # where the palms belong: on the two faces of the box that point left / right as seen by the
-        # robot, anywhere along them, with their upper edge just under the rim
+        # robot, with their upper edge just under the rim
         fwd = np.stack([np.cos(self.yaw), np.sin(self.yaw), np.zeros(n)], axis=1)
         left = np.stack([-np.sin(self.yaw), np.cos(self.yaw), np.zeros(n)], axis=1)
         reach = np.abs((left * bx).sum(1)) * hx + np.abs((left * by).sum(1)) * hy + np.abs((left * bz).sum(1)) * hz
@@ -275,7 +275,8 @@ class SortEnv(RobotEnv):
         dist = []
         for k, side in enumerate((1.0, -1.0)):
             rel = self.grip_pos[:, k] - middle
-            along = np.clip((rel * fwd).sum(axis=1), -(depth - 0.04), depth - 0.04)
+            # ... near the middle of that face: a crate held at one end tips over when it is lifted
+            along = np.clip((rel * fwd).sum(axis=1), -cfg.grip_along, cfg.grip_along)
             dist.append(np.linalg.norm(rel - fwd * along[:, None] - side * left * reach[:, None], axis=1))
         self.grip_dist = np.stack(dist, axis=1)
         gripped = (self.grip_dist < cfg.grip_distance).all(axis=1)
@@ -308,10 +309,12 @@ class SortEnv(RobotEnv):
         # before the box leaves the table: the share of its weight the hands already carry
         weight = 9.81 * self.box_masses[self.box_mass_index]
         carried = np.clip(1.0 - self.table_force / weight, 0.0, 1.0)
-        progress[lifting] = 0.5 * carried[lifting] + 0.5 * np.clip(self.box_above[lifting] / cfg.lift_height, 0.0, 1.0)
+        # a crate that hangs crooked earns nothing: lifting one end while the other stays on the table is not a lift
+        upright = np.clip(1.0 - (1.0 - np.abs(bz[:, 2])) / cfg.max_tilt, 0.0, 1.0)
+        progress[lifting] = (0.5 * carried[lifting] + 0.5 * np.clip(self.box_above[lifting] / cfg.lift_height, 0.0, 1.0)) * upright[lifting]
         carrying = gripped & ~lifting & ~over_target
         stage[carrying] = 2
-        progress[carrying] = 1.0 - np.clip(place_dist[carrying] / 2.6, 0.0, 1.0)
+        progress[carrying] = (1.0 - np.clip(place_dist[carrying] / 2.6, 0.0, 1.0)) * (0.5 + 0.5 * upright[carrying])
         lowering = gripped & over_target & ~resting
         stage[lowering] = 3
         progress[lowering] = 1.0 - np.clip(self.box_above[lowering] / 0.12, 0.0, 1.0)
