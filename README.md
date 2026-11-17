@@ -2,10 +2,12 @@
 
 Teaches a simulated humanoid two things with reinforcement learning (PPO):
 
-1. **Hike** - follow winding mountain trails: irregular rock steps, stepping stones with
-   gaps, narrow ridges, boulders. Fall off the side and it is a one metre drop.
-2. **Sort** - pick up crates of different weights and carry each one to the table of its
-   colour.
+1. **Hike** - follow winding mountain trails: slopes up, down and sideways, rock steps,
+   stepping stones with gaps, ridges, a balance beam, a plank bridge with hand rails, roots
+   and logs to step over, walls, gates and rocks to get around. Fall off the side and it is
+   a one metre drop.
+2. **Sort** - pick up crates of 0.5 - 6 kg (the robot is not told the weight) and carry each
+   one to the table of its colour.
 
 Thousands of robots are simulated in parallel with [MuJoCo](https://mujoco.org/), curricula
 make the tasks harder as the robots get better, the physics is randomised so the controller
@@ -16,12 +18,12 @@ learns the controllers.
 
 | Task | State | Bundled checkpoint |
 | --- | --- | --- |
-| hike | trained (2,400 iterations) and evaluated, see [results](#hike-results) | `pretrained/hike.pt` |
-| sort | **training in progress, it does not sort yet.** After 450 iterations the robot walks to the table, hooks its palms under the rim of the crate and lifts it; carrying it to the right table and putting it down is what is left to learn. See [continuing the sorting training](#continuing-the-sorting-training). | `pretrained/sort.pt` |
+| sort | **works without help**: 4.97 crates sorted per 30 s episode, 97 % of robots deliver, none to the wrong table - see [sort results](#sort-results) | `pretrained/sort.pt` |
+| hike | trained on the hard trails (3,200 iterations); the arms still stay clamped to the body - a fix is in `config.py` / `env_hike.py` but not trained yet | `pretrained/hike.pt` |
 
-A 2.5 minute video of the hiking policy on seven trails - four training trails, a trail
-layout and switchbacks it never trained on, and a hike with a heavy backpack while being
-shoved: [docs/hike.mp4](docs/hike.mp4).
+Videos: [docs/sort.mp4](docs/sort.mp4) (sorting, including crates heavier than any in
+training) and [docs/hike.mp4](docs/hike.mp4) (an earlier hiking policy, before the trails got
+harder).
 
 Built as a reinforcement learning practice project, with the main goal of understanding
 how the robot model, environment design, rewards and training setup decide whether a robot
@@ -34,17 +36,21 @@ learns anything at all.
   28.5 kg, PD position servos with torque limits. The arms are free to swing for balance
   when hiking and carry the crates when sorting.
 - **Hiking trails** (`terrain.py`): procedurally generated, raised, winding paths built from
-  rock columns, assembled from sections (rock steps, stepping stones, ridges, boulders, ...)
-  in 10 difficulty levels. A curriculum moves every robot to harder or easier trails
-  depending on how it did.
+  rock columns and tilted slabs, assembled from 22 kinds of section (ramps, banked and
+  V-shaped slopes, rock steps, stepping stones, ridges, a beam, a plank bridge with rails,
+  roots, logs, loose stones, canyons, gates, rocks in the way, a ledge, ...) in 10
+  difficulty levels. A curriculum moves every robot to harder or easier trails depending
+  on how it did, and more robots to the kinds of trail they fail on.
 - **Sorting room** (`env_sort.py`): a pickup table, three coloured drop-off tables (which is
   which changes every episode) and crates of 0.5 - 6 kg in five sizes. The robot is not told
   the weight of a crate.
 - **Generalisation**: training randomises friction, payload, motor strength, sensor noise
   and shoves; `python main.py eval` then tests on trail sections, layouts and physics that
   were never used in training.
-- **Fast**: physics for all robots is stepped by MuJoCo's multi-threaded rollout on every
-  CPU core, the neural networks run on the GPU.
+- **Fast**: physics for all robots is stepped by MuJoCo's multi-threaded rollout, split over
+  8 processes so that observations and rewards are computed in parallel too; the networks
+  run on the GPU. About 55,000 simulation steps per second on the laptop (a 1,000-iteration
+  run takes half an hour).
 - **Tools**: interactive viewer, video export, evaluation tables, TensorBoard logging,
   resumable checkpoints.
 
@@ -103,9 +109,9 @@ python main.py play --task hike --terrain trail --level 7
 python main.py play --task sort
 ```
 
-Hiking trails to choose from: `flat`, `rocky`, `climb`, `stones`, `ridge`, `trail` (the
-training trails) and `logs`, `terraces`, `rubble`, `staircase`, `switchbacks`, `new_trail`
-(never used in training). Keys in the viewer: BACKSPACE restarts, UP / DOWN change the
+Hiking trails to choose from: `flat`, `rocky`, `climb`, `slopes`, `stones`, `ridge`, `walls`,
+`hazards`, `trail` (the training trails) and `terraces`, `rubble`, `staircase`, `steep`,
+`debris`, `switchbacks`, `new_trail` (never used in training). Keys in the viewer: BACKSPACE restarts, UP / DOWN change the
 walking speed.
 
 Measure success rates, including conditions the policy never trained in:
@@ -132,49 +138,64 @@ python main.py train --task hike --resume
 python main.py train --task sort --resume
 ```
 
+Follow the training that is running (speed, progress, minutes left; Ctrl+C stops watching,
+not the training). You can open the viewer at the same time - it loads the newest checkpoint:
+
+```bash
+python main.py watch
+```
+
 Training curves:
 
 ```bash
 tensorboard --logdir logs
 ```
 
-### Continuing the sorting training
+### How the sorting policy was trained
 
-The bundled `pretrained/sort.pt` is a full checkpoint (network, optimizer, curriculum
-state) of an unfinished run. To carry on from it:
-
-```bash
-python main.py train --task sort --resume pretrained/sort.pt --iterations 3000 --name sort_laptop
-```
-
-What to watch in the console (the same numbers are in TensorBoard under `episode/`):
-
-| Column | Meaning | Where the bundled checkpoint is |
-| --- | --- | --- |
-| `stage` | furthest stage reached per episode, averaged: 0 fetch, 1 lift, 2 carry, 3 lower, 4 release | about 1 |
-| `sorted` | crates sorted per 30 s episode | 0 |
-| `kg` | heaviest crate in use; one more weight is added whenever `stage` reaches 1.7 | 1.5 |
-| `guided` | share of robots that are told where to walk, see below; goes down once `sorted` reaches 1 | 1.00 |
-| `drop` / `wrong` | crates dropped / put on the wrong table per episode | 0.6 / 0 |
-
-The run is finished when `guided` is 0.00, `kg` is 6.00 and `sorted` has stopped rising.
-How long that takes is not known yet: nobody has run it to the end. On the 4-core CPU it
-was developed on it ran at about 3,500 steps/s (16 s per iteration); the laptop should be
-several times faster. If `stage` stays below 1.7 for many hundreds of iterations, the
-rewards in `SortCfg` (config.py) are the place to experiment - the section
-[what was learned building this](#what-was-learned-building-this) lists what has been
-tried.
-
-To start the sorting training from the beginning instead (it starts from a hiking
-policy - your newest one, or the bundled one):
+1. **From the hiker.** The sorting policy starts as a copy of a hiking policy, so it can walk
+   from the first iteration (`python main.py train --task sort` does this by itself).
+2. **With a guide.** At first a few lines of code (the "guide") tell it where to walk: to the
+   crate, then to the table of the crate's colour. It learns to grip, lift, carry, put down
+   and let go. Heavier crates are added only once it actually delivers.
+3. **Without the guide, by imitation.** The guided policy teaches a copy of itself that does
+   not see the guide's commands; the copy works out where to go from the crate's colour and
+   where the coloured tables are:
 
 ```bash
-python main.py train --task sort --name sort_from_hiker
+python main.py distill --teacher models/<run>/model_<n>.pt
 ```
+
+The console columns while training: `stage` (furthest stage per episode: 0 fetch, 1 lift,
+2 carry, 3 lower, 4 release), `sorted` (crates per 30 s episode), `kg` (heaviest crate in
+use), `guided` (share of robots that get the guide's commands), `alone` (crates sorted by
+the robots without them).
+
+## Sort results
+
+`pretrained/sort.pt`, measured with `python main.py eval --task sort --num_envs 600`: no
+guide, exploration noise off, one 30 s episode per robot.
+
+| Condition | Crates sorted | Robots that sort at least one | Robots that fell | Wrong table |
+| --- | --- | --- | --- | --- |
+| training conditions (crates 0.5 - 6 kg) | 4.97 | 97 % | 1 % | 0.00 |
+| heavier crates (6.5 - 8 kg, never in training) | 3.18 | 88 % | 4 % | 0.00 |
+| very light crates (0.3 - 1 kg) | 4.72 | 96 % | 2 % | 0.00 |
+| heavy backpack (+6 kg) | 4.37 | 96 % | 4 % | 0.00 |
+| shoves (0.6 m/s every 4 s) | 4.89 | 98 % | 2 % | 0.00 |
+| weak motors (80 %) | 2.34 | 78 % | 10 % | 0.01 |
+| slippery floor (friction 0.4) | 1.84 | 82 % | 51 % | 0.00 |
+
+The first crate is delivered by 86 - 100 % of the robots at every weight from 0.5 to 6 kg,
+on average 4.2 s into the episode. The weak spot is a slippery floor.
 
 ## Hike results
 
-`pretrained/hike.pt` after 2,400 iterations (49 million simulation steps), measured with
+*These numbers are for an earlier policy, before slopes, hazards, walls, the beam and the
+bridge were added; the bundled `pretrained/hike.pt` is the newer one and has not been
+measured the same way yet.*
+
+The policy after 2,400 iterations (49 million simulation steps), measured with
 `python main.py eval --task hike --num_envs 1000`: one episode per robot, exploration noise
 off, success = reaching the end of the trail within 30 s.
 
@@ -244,16 +265,16 @@ trail tile is one small MuJoCo model; a single world containing all 60 trails wo
 several times slower to step.
 
 **Control.** The policy runs at 50 Hz and outputs 20 joint position targets (offsets from a
-default pose) that PD servos track at 200 Hz.
+default pose) that PD servos track; physics takes two 10 ms steps per decision.
 
 **Hiking.** A navigation layer turns "where does the trail go" into a velocity command
 (forward, sideways, turning rate): walk towards the point 0.75 m ahead on the trail and face
 the way the trail runs. The policy sees that command, its own motion and joints, a gait
-clock and a 16 x 9 height scan of the ground ahead (218 numbers), and has to realise the
-command without falling off.
+clock, a 16 x 9 height scan of the ground ahead and the contact force on its palms (220
+numbers), and has to realise the command without falling off. The arms get a small reward
+for swinging against the legs and are otherwise free.
 
-**Sorting.** The reward is a progress score, `5 x crates sorted + stage + progress within
-the stage`, with the stages fetch, lift, carry, lower, release - finishing a stage always
+**Sorting.** The reward is a progress score over the stages, with the stages fetch, lift, carry, lower, release - finishing a stage always
 pays more than lingering in it. Which stage a robot is in is worked out from the physical
 state (where the palms and the crate are, how much of the crate's weight still rests on
 the table).
@@ -293,6 +314,18 @@ Things that did not work, in case you run into the same walls:
   is rewarded by the share of the weight the hands already carry.
 - **Penalties that teach avoidance.** A penalty for dropping a crate taught the robots to
   keep their hands away from crates. A dropped crate is now simply replaced.
+- **Rewards that pay for a half-solution.** Hooking the palms under one end of the crate
+  tipped it like a lid and counted as lifting; then holding a crate just above the table
+  paid nearly as much as carrying it. Only an upright lift counts now, and carrying is
+  worth three times as much as holding.
+- **Curricula that run ahead.** Heavier crates were added whenever robots briefly reached
+  the carry stage (2 kg to 6 kg in 300 iterations), and the guide was withdrawn from 90 %
+  of the robots in 200 iterations; both times deliveries collapsed. Both now move in small
+  steps, need real deliveries, and the guide comes back when deliveries drop. Removing the
+  guide finally worked by imitation (distillation), not by trial and error.
+- **A robot that braces against itself.** The hiker learned to press its palms against its
+  thighs and its forearms against its trunk - the arm motors then help the legs. Penalties
+  on the palms alone just moved the bracing to the elbows.
 
 ## Hardware notes (Ryzen 7 8845HS + RTX 4050)
 
@@ -301,8 +334,10 @@ Things that did not work, in case you run into the same walls:
 - The networks are small; the GPU mainly makes the PPO update fast. If PyTorch reports
   `device: cpu`, the CPU-only build of torch is installed - reinstall with the CUDA command
   from the setup section.
-- 2,048 robots is the default. `--num_envs 4096` gives smoother learning if the CPU keeps
-  up; halve it if the machine is short of memory.
+- 4,096 robots is the default; halve it (`--num_envs 2048`) if the machine is short of
+  memory.
+- **Plug the laptop in.** On battery Windows switches the RTX 4050 off and throttles the CPU:
+  training drops from about 55,000 to under 10,000 steps per second.
 
 ## License
 
