@@ -261,7 +261,9 @@ class HikeEnv(RobotEnv):
         arm_err = ((self.joint_pos[:, self._shoulder_pitch] - target) ** 2).sum(axis=1)
         outside = np.clip(self._arm_lower - self.joint_pos, 0.0, None) + np.clip(self.joint_pos - self._arm_upper, 0.0, None)
         return {
-            "arm_posture": (outside ** 2).sum(axis=1),
+            # linear, so it pushes from the first millimetre outside the range (a squared penalty is flat at the
+            # edge, and the policy parked its arms just outside the range, still braced against the trunk)
+            "arm_posture": (outside + 2.0 * outside ** 2).sum(axis=1),
             "hands_in": self._hands_in().sum(axis=1),
             "arm_swing": np.exp(-arm_err / 0.1) * ~self.standing,
             "tracking_lin_vel": np.exp(-lin_err / sigma),

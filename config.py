@@ -301,7 +301,7 @@ class RewardCfg:
     hands_clear = 0.215             # palms closer than this to the body's middle plane count as tucked in [m]
 
     hike = {
-        "arm_posture": -6.0,        # arm joints outside their free range (see arm_free_range)
+        "arm_posture": -3.0,        # arm joints outside their free range (see arm_free_range)
         "hands_in": -15.0,          # palms pressed against the thighs / trunk. Bracing the arms against its own
                                     # body lets the arm motors help the legs: a cheat, and it pins the arms down
         "arm_swing": 1.0,           # arms swinging against the legs, like people walk. Only the shoulders'
